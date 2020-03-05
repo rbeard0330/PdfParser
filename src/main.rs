@@ -229,10 +229,20 @@ fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<PDFObj, PDFError>
                     let object_buffer_length = object_buffer.len();
                     if object_buffer_length <= 1 {
                         return Err(PDFError{ message: "Could not parse reference to object", location: index })
-
-                    }
-
-                }
+                    };
+                    let new_object = match object_buffer.slice(object_buffer_length - 2: object_buffer_length) {
+                        [PDFObj::NumberInt(n1), PDFObj::NumberInt(n2)] => PDFObj::ObjectRef {
+                            id_number: n1, gen_number: n2 as u16
+                        },
+                        _ => return Err(PDFError{ message: "Could not parse reference to object", location: index })
+                    };
+                    object_buffer.truncate(object_buffer_length - 2);
+                    object_buffer.push(new_object);
+                    state
+                },
+                let keyword_list = ["stream", "endstream", "obj", "endobj", "null", "true", "false"];
+                let xref_kws = ["f\n", "n\n", "xref"];
+                let trailer_kws = ["trailer", "startxref"];
             },
             ParserState::HexString => match c {
                 b'>' => {
