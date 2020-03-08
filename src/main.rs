@@ -55,9 +55,9 @@ impl fmt::Display for PDFObj {
             Name(s) => write!(f, "Name: {}", s),
             CharString(s) => write!(f, "String: {}", s),
             HexString(s) => write!(f, "String: {:?}", s),
-            Array(v) => write!(f, "Array: {:?}", v),
-            Dictionary(h) => write!(f, "Dictionary: {:?}", h),
-            Stream(d, _) => write!(f, "Stream object: {:?}", d),
+            Array(v) => write!(f, "Array: {:#?}", v),
+            Dictionary(h) => write!(f, "Dictionary: {:#?}", h),
+            Stream(d, _) => write!(f, "Stream object: {:#?}", d),
             Comment(s) => write!(f, "Comment: {:?}", s),
             Keyword(kw) => write!(f, "Keyword: {:?}", kw),
             ObjectRef{id_number, gen_number} => 
@@ -111,8 +111,8 @@ fn main(){
     
     //let raw_pdf = fs::read("data/simple_pdf.pdf").expect("Could not read data!");
     //let raw_pdf = fs::read("data/CCI01212020.pdf").expect("Could not read data!");
-    //let raw_pdf = fs::read("data/document.pdf").expect("Could not read data!");
-    let raw_pdf = fs::read("data/2018W2.pdf").expect("Could not read data!");
+    let raw_pdf = fs::read("data/document.pdf").expect("Could not read data!");
+    //let raw_pdf = fs::read("data/2018W2.pdf").expect("Could not read data!");
     println!("{}", raw_pdf.len());
     let pdf = parse_pdf(raw_pdf).expect("Processing error");
     
@@ -125,10 +125,9 @@ fn parse_pdf(bytes: Vec<u8>) -> Result<PDF, PDFError> {
     println!("trailer starts at: {:?}", trailer_index);
     let trailer = process_trailer(&bytes, trailer_index)?;
     let xref_table = process_xref_table(&bytes, trailer.xref_index, trailer_index)?;
-    println!("xref: {:?}", xref_table);
     for (object_number, index) in xref_table {
         match parse_object(&bytes, index) {
-            Ok((obj, _)) => {} //println!("Obj #{}: {}", index, obj),
+            Ok((obj, _)) => println!("Obj #{}: {}", object_number, obj),
             Err(e) => {
                 println!("Obj #{}: {:?}", object_number, e);
                 let prev_characters: Vec<char> = bytes[(e.location - 10)..e.location].iter().map(|c| *c as char).collect();
@@ -169,7 +168,7 @@ fn find_trailer_index(bytes: &Vec<u8>) -> Result<usize, PDFError> {
 fn process_trailer(bytes: &Vec<u8>, start_index: usize) -> Result<PDFTrailer, PDFError> {
     assert_eq!(&(String::from_utf8(Vec::from(&bytes[start_index..start_index + 8])).unwrap()), "trailer\n");
     let (trailer_dict, next_index) = parse_object(&bytes, start_index + 7)?;
-    let trailer_string = String::from_utf8(bytes[next_index..].to_vec())
+    let trailer_string = String::from_utf8(bytes[(next_index + 1)..].to_vec())
                         .expect("Could not convert trailer to string!");
     let mut trailer_lines = trailer_string
                             .lines()
@@ -272,24 +271,41 @@ fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), 
                     object_buffer.push(new_array);
                     state
                 },
-                b']' if this_object_type == PDFComplexObject::Array => {
-                    return make_array_from_object_buffer(object_buffer, index + 1)
+                b']' => {
+                    if this_object_type == PDFComplexObject::Array {
+                        return make_array_from_object_buffer(object_buffer, index)
+                    } else {
+                        println!("-------Array ended but I'm a {:?}", this_object_type);
+                        return Err(PDFError {
+                            message: "Invalid terminator: ]", location: index
+                        }) 
+                    }
                 },
                 b'<' if peek_ahead_by_n(&bytes, index, 1) == Some(b'<') => {
                     if this_object_type == PDFComplexObject::Unknown {
                         this_object_type = PDFComplexObject::Dict;
                         index += 1;
+                        println!("Dict started at: {}", index);
                     } else {
+                        println!("Nested dict in {:?} at {}", this_object_type, index);
                         let (new_dict, end_index) = parse_object(&bytes, index)?;
                         index = end_index;
+                        //println!("Nested dict closed at {}", index);
                         object_buffer.push(new_dict);
                     };
                     state
                 },
                 b'<' => { ParserState::HexString },
-                b'>' if (peek_ahead_by_n(&bytes, index, 1) == Some(b'>')
-                        && this_object_type == PDFComplexObject::Dict) => {
-                    return make_dict_from_object_buffer(object_buffer, index + 2)
+                b'>' if (peek_ahead_by_n(&bytes, index, 1) == Some(b'>')) => {
+                    if this_object_type == PDFComplexObject::Dict {
+                        return make_dict_from_object_buffer(object_buffer, index + 1)
+                    } else {
+                        println!("-------Dictionary ended but I'm a {:?}", this_object_type);
+                        println!("Buffer: {:#?}", object_buffer);
+                        return Err(PDFError {
+                            message: "Invalid terminator: >>", location: index
+                        }) 
+                    }
                 },
                 b'(' => { ParserState::CharString(0) },
                 b'/' => { ParserState::Name },
@@ -314,7 +330,9 @@ fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), 
                 },
                 b'0'..= b'9' | b'+' | b'-' => { index -= 1; ParserState::Number },
                 _ if is_whitespace(c) => state,
-                _ => { println!("{}", c as char); return Err(PDFError { message: "Invalid character", location: index}) }
+                _ => { println!("Invalid character: {}", c as char); return Err(PDFError {
+                    message: "Invalid character", location: index
+                }) }
             },
             ParserState::HexString => match c {
                 b'>' => {
@@ -360,12 +378,12 @@ fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), 
                         },
                         d @ b'0'..=b'7' => {
                             index += 1;
-                            let mut code = d - 48; // ASCII 0 = 48
+                            let mut code = d - b'0'; 
                             if index + 1 < length && is_octal(bytes[index + 1]) {
-                                code = code * 8 + bytes[index + 1] - 48;
+                                code = code * 8 + (bytes[index + 1] - b'0');
                                 index += 1;
                                 if index + 1 < length && is_octal(bytes[index + 1]) {
-                                    code = code * 8 + bytes[index + 1] - 48;
+                                    code = code * 8 + (bytes[index + 1] - b'0');
                                     index += 1;
                                 }
                             };
@@ -442,11 +460,19 @@ fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), 
                             ),
                         PDFObj::Keyword(PDFKeyword::Obj) => {
                             this_object_type = PDFComplexObject::IndirectObj;
+                            index -= 1;
+                            println!("parsing an object");
                             ParserState::Neutral
-                        }
-                        _ => {
+                        },
+                        PDFObj::Keyword(_) => {
                             object_buffer.push(this_keyword);
+                            index -= 1;
                             ParserState::Neutral
+                        },
+                        _ =>{
+                            return Err(PDFError{
+                                message: "Not a recognized keyword", location: index
+                            })
                         }
                     }
                 } else {
@@ -469,7 +495,11 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
             };
             PDFObj::HexString(buffer.clone() as Vec<u8>)
         },
-        ParserState::CharString(0) => PDFObj::CharString(str::from_utf8(buffer).unwrap().to_string()),
+        ParserState::CharString(0) => {
+            println!("Vec: {:?}", buffer);
+
+            PDFObj::CharString(str::from_utf8(buffer).unwrap().to_string())
+        },
         ParserState::CharString(_c) => {
             return Err(PDFError{ message: "Asked to create string with unclosed parens", location: 0 });
         },
@@ -510,7 +540,10 @@ fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) ->
     let mut object_it = object_buffer.into_iter();
     loop {
         let key = match object_it.next() {
-            None => return Ok((PDFObj::Dictionary(Box::new(dict)), end_index)),
+            None => {
+                println!("completed a dict: {:?}", dict);
+                return Ok((PDFObj::Dictionary(Box::new(dict)), end_index))
+            },
             Some(PDFObj::Name(s)) => s,
             _ => return Err(PDFError{ message: "Dictionary key was not a Name", location: end_index})
         };
