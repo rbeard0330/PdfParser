@@ -190,3 +190,45 @@ fn _get_next_token(bytes: &Vec<u8>, index: usize) -> Result<(PDFToken, PDFCharac
     Result::Ok((token, delimiter, this_index))
 
 }
+
+#[derive(Debug)]
+#[derive(PartialEq)]
+enum PDFCharacter {
+    //Regular
+    Regular(char),
+    //White space
+    InlineWhitespace,
+    CarriageReturn,
+    LineFeed,
+    //Delimiters
+    OpenParen,
+    CloseParen,
+    OpenAngle,
+    CloseAngle,
+    OpenBracket,
+    CloseBracket,
+    OpenBrace,
+    CloseBrace,
+    Solidus,
+    PercentSymbol,
+}
+
+#[derive(Debug)]
+#[derive(PartialEq)]
+enum PDFToken {
+    Word(String),
+    StreamStart,
+    Newline,
+    Bytes(Vec<u8>),
+}
+
+impl fmt::Display for PDFToken {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PDFToken::Word(s) => write!(f, "{}", &s),
+            PDFToken::StreamStart => write!(f, "stream"),
+            PDFToken::Newline => write!(f, "Newline"),
+            PDFToken::Bytes(_v) => write!(f, "Bytes")
+        }
+    }
+}
