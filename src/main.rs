@@ -30,19 +30,10 @@ enum PDFObj {
     Stream(Box<HashMap<String, PDFObj>>, Vec<u8>),
     Comment(String),
     Keyword(PDFKeyword),
-    ObjectRef{id_number: u32, gen_number: u16 },
-    IndirectObject{ id_number: u32, gen_number: u16, object:Box<PDFObj> },
+    ObjectRef(ObjectID),
+    IndirectObject{ id: ObjectID, object:Box<PDFObj> },
 }
 
-impl PDFObj {
-    fn unwrap(obj: PDFObj) -> Result<PDFObj, PDFError> {
-        if let PDFObj::ObjectRef{ id_number, gen_number } = obj {
-            return Err(PDFError {message: "Indirect references not implemented", location: 0})
-        }
-        Ok(obj)
-
-    }
-}
 
 impl fmt::Display for PDFObj {
     
@@ -60,14 +51,264 @@ impl fmt::Display for PDFObj {
             Stream(d, _) => write!(f, "Stream object: {:#?}", d),
             Comment(s) => write!(f, "Comment: {:?}", s),
             Keyword(kw) => write!(f, "Keyword: {:?}", kw),
-            ObjectRef{id_number, gen_number} => 
+            ObjectRef(ObjectID(id_number, gen_number)) => 
                 write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number),
-            IndirectObject{id_number, gen_number, object} => 
+            IndirectObject{ id: ObjectID(id_number, gen_number), object} => 
                 write!(f, "Object with id {} and gen {}: {}", id_number, gen_number, object)
         };
         Ok(())
     }
 
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjectID(u32, u16);
+
+struct ObjectMap {
+    index_map: HashMap<ObjectID, usize>,
+    object_map: HashMap<ObjectID, PDFObj>
+}
+
+impl ObjectMap {
+    fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), PDFError> {
+        let mut state = ParserState::Neutral;
+        let mut index = start_index;
+        let mut this_object_type = PDFComplexObject::Unknown;
+        let length = bytes.len();
+        if index > length { return Err(PDFError { message: "index out of range" , location: index })};
+        let mut char_buffer = Vec::new();
+        let mut object_buffer = Vec::new();
+        loop {
+            if index > length {
+                return Err(PDFError { message: "end of file while parsing object" , location: index })
+            };
+            let c = bytes[index];
+            state = match state {
+                ParserState::Neutral => match c {
+                    b'[' if this_object_type == PDFComplexObject::Unknown => {
+                        this_object_type = PDFComplexObject::Array;
+                        state
+                    },
+                    b'[' => {
+                        let (new_array, end_index) = parse_object(&bytes, index)?;
+                        index = end_index;
+                        object_buffer.push(new_array);
+                        state
+                    },
+                    b']' => {
+                        if this_object_type == PDFComplexObject::Array {
+                            return make_array_from_object_buffer(object_buffer, index)
+                        } else {
+                            println!("-------Array ended but I'm a {:?}", this_object_type);
+                            return Err(PDFError {
+                                message: "Invalid terminator: ]", location: index
+                            }) 
+                        }
+                    },
+                    b'<' if peek_ahead_by_n(&bytes, index, 1) == Some(b'<') => {
+                        if this_object_type == PDFComplexObject::Unknown {
+                            this_object_type = PDFComplexObject::Dict;
+                            index += 1;
+                            //println!("Dict started at: {}", index);
+                        } else {
+                            //println!("Nested dict in {:?} at {}", this_object_type, index);
+                            let (new_dict, end_index) = parse_object(&bytes, index)?;
+                            index = end_index;
+                            //println!("Nested dict closed at {}", index);
+                            object_buffer.push(new_dict);
+                        };
+                        state
+                    },
+                    b'<' => { ParserState::HexString },
+                    b'>' if (peek_ahead_by_n(&bytes, index, 1) == Some(b'>')) => {
+                        if this_object_type == PDFComplexObject::Dict {
+                            //println!("Dictionary ended at {}", index + 1);
+                            return make_dict_from_object_buffer(object_buffer, index + 1)
+                        } else {
+                            println!("-------Dictionary ended but I'm a {:?}", this_object_type);
+                            println!("Buffer: {:#?}", object_buffer);
+                            return Err(PDFError {
+                                message: "Invalid terminator: >>", location: index
+                            }) 
+                        }
+                    },
+                    b'(' => { ParserState::CharString(0) },
+                    b'/' => { ParserState::Name },
+                    b'R' => {
+                        let object_buffer_length = object_buffer.len();
+                        if object_buffer_length <= 1 {
+                            return Err(PDFError{ message: "Could not parse reference to object", location: index })
+                        };
+                        let new_object = match object_buffer[(object_buffer_length - 2)..object_buffer_length] {
+                            [PDFObj::NumberInt(n1), PDFObj::NumberInt(n2)] if n1 >= 0 && n2 >= 0 =>
+                                PDFObj::ObjectRef(ObjectID(n1 as u32, n2 as u16)),
+                            _ => return Err(PDFError{ message: "Could not parse reference to object", location: index })
+                        };
+                        object_buffer.truncate(object_buffer_length - 2);
+                        object_buffer.push(new_object);
+                        state
+                    },
+                    b's' | b'e' | b'o' | b'n' | b't' | b'f' => {
+                        char_buffer.push(c);
+                        ParserState::Keyword
+                    },
+                    b'0'..= b'9' | b'+' | b'-' => { index -= 1; ParserState::Number },
+                    _ if is_whitespace(c) => state,
+                    _ => { println!("Invalid character: {}", c as char); return Err(PDFError {
+                        message: "Invalid character", location: index
+                    }) }
+                },
+                ParserState::HexString => match c {
+                    b'>' => {
+                        object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
+                        ParserState::Neutral
+                    },
+                    b'0'..=b'9' | b'A'..=b'F' => {
+                        char_buffer.push(c);
+                        state
+                    },
+                    _ if is_whitespace(c) => state,
+                    _ => return Err(PDFError{ message: "invalid character in hexstring", location: index })
+                },
+                ParserState::CharString(depth) => match c {
+                    b')' if depth == 0 => {
+                        //println!("Making a string at {}", index);
+                        object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
+                        ParserState::Neutral
+                    },
+                    b')' if depth > 0 => ParserState::CharString(depth - 1),
+                    b'(' => ParserState::CharString(depth + 1),
+                    b'\\' if index + 1 < length => {
+                        match bytes[index + 1] {
+                            15 => {
+                                index += 1; // Skip carriage return
+                                if index + 1 < length && bytes[index + 1] == 12 { index += 1}; // Skip linefeed too
+                                state
+                            },
+                            12 => {index += 1; state}, // Escape naked LF
+                            b'\\' => {
+                                index += 1;
+                                char_buffer.push(b'\\');
+                                state
+                            },
+                            b'(' => {
+                                index += 1;
+                                char_buffer.push(b'(');
+                                state
+                            },
+                            b')' => {
+                                index += 1;
+                                char_buffer.push(b')');
+                                state
+                            },
+                            d @ b'0'..=b'7' => {
+                                index += 1;
+                                let mut code = d - b'0'; 
+                                if index + 1 < length && is_octal(bytes[index + 1]) {
+                                    code = code * 8 + (bytes[index + 1] - b'0');
+                                    index += 1;
+                                    if index + 1 < length && is_octal(bytes[index + 1]) {
+                                        code = code * 8 + (bytes[index + 1] - b'0');
+                                        index += 1;
+                                    }
+                                };
+                                char_buffer.push(code);
+                                state
+                            },
+                            _ => state // Other escaped characters do not require special treatment
+                        }
+                    },
+                    _ => { char_buffer.push(c); state}
+                },
+                ParserState::Name => {
+                    if c != b'%' && (is_whitespace(c) || is_delimiter(c)) {
+                        object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
+                        index -= 1; // Need to parse delimiter character on next iteration
+                        ParserState::Neutral
+                    } else {
+                        char_buffer.push(c);
+                        state
+                    }
+                },
+                ParserState::Number => match c {
+                    b'0'..=b'9' => {
+                        char_buffer.push(c);
+                        state
+                    },
+                    b'-' | b'+' if char_buffer.len() == 0 => {
+                        char_buffer.push(c);
+                        state
+                    },
+                    b'.' => {
+                        if char_buffer.contains(&b'.') {
+                            return Err(PDFError { message: "two decimal points in number", location: index }) };
+                        char_buffer.push(c);
+                        state
+                    },
+                    _ if is_whitespace(c) || is_delimiter(c) => {
+                        object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
+                        index -= 1; // Need to parse delimiter character on next iteration
+                        ParserState::Neutral
+                    },
+                    _ => return Err(PDFError { message: "invalid character in number", location: index }) 
+                },
+                ParserState::Comment => {
+                    if is_EOL(c) {
+                        object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
+                        ParserState::Neutral
+                    } else {
+                        char_buffer.push(c);
+                        state
+                    }
+                },
+                ParserState::Keyword => {
+                    if !is_body_keyword_letter(c) {
+                        if !(is_delimiter(c) || is_whitespace(c)) {
+                            return Err(PDFError{ message: "Invalid character in keyword", location: index})
+                        };
+                        let this_keyword = flush_buffer_to_object(&state, &mut char_buffer)?;
+                        match this_keyword {
+                            PDFObj::Keyword(PDFKeyword::EndObj) => {
+                                if this_object_type == PDFComplexObject::IndirectObj {
+                                    return make_object_from_object_buffer(object_buffer, index)
+                                } else {
+                                    return Err(PDFError{
+                                        message: "Encountered endobj outside indirect object", location: index})
+                                };
+                            },
+                            PDFObj::Keyword(PDFKeyword::Stream) => {
+                                return make_stream_object(&bytes, object_buffer, index)
+                            },
+                            PDFObj::Keyword(PDFKeyword::Obj) if this_object_type != PDFComplexObject::Unknown => 
+                                return Err(
+                                    PDFError{ message: "Encountered nested obj declaration", location: index}
+                                ),
+                            PDFObj::Keyword(PDFKeyword::Obj) => {
+                                this_object_type = PDFComplexObject::IndirectObj;
+                                index -= 1;
+                                ParserState::Neutral
+                            },
+                            PDFObj::Keyword(_) => {
+                                object_buffer.push(this_keyword);
+                                index -= 1;
+                                ParserState::Neutral
+                            },
+                            _ =>{
+                                return Err(PDFError{
+                                    message: "Not a recognized keyword", location: index
+                                })
+                            }
+                        }
+                    } else {
+                        char_buffer.push(c);
+                        state
+                    }
+                }
+            };
+            index += 1;
+        };
+    }
+    
 }
 
 #[derive(Debug, PartialEq)]
@@ -127,7 +368,7 @@ fn parse_pdf(bytes: Vec<u8>) -> Result<PDF, PDFError> {
     let xref_table = process_xref_table(&bytes, trailer.xref_index, trailer_index)?;
     for (object_number, index) in xref_table {
         match parse_object(&bytes, index) {
-            Ok((obj, _)) => println!("Obj #{}: {}", object_number, obj),
+            Ok((obj, _)) => {} // println!("Obj #{}: {}", object_number, obj),
             Err(e) => {
                 println!("Obj #{}: {:?}", object_number, e);
                 let prev_characters: Vec<char> = bytes[(e.location - 10)..e.location].iter().map(|c| *c as char).collect();
@@ -228,8 +469,7 @@ enum ParserState {
     Keyword
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 enum PDFKeyword {
     Stream,
     EndStream,
@@ -246,244 +486,56 @@ enum PDFKeyword {
     StartXRef
 }
 
-fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), PDFError> {
-    let mut state = ParserState::Neutral;
-    let mut index = start_index;
-    let mut this_object_type = PDFComplexObject::Unknown;
-    let length = bytes.len();
-    if index > length { return Err(PDFError { message: "index out of range" , location: index })};
-    let mut char_buffer = Vec::new();
-    let mut object_buffer = Vec::new();
-    loop {
-        if index > length {
-            return Err(PDFError { message: "end of file while parsing object" , location: index })
-        };
-        let c = bytes[index];
-        state = match state {
-            ParserState::Neutral => match c {
-                b'[' if this_object_type == PDFComplexObject::Unknown => {
-                    this_object_type = PDFComplexObject::Array;
-                    state
-                },
-                b'[' => {
-                    let (new_array, end_index) = parse_object(&bytes, index)?;
-                    index = end_index;
-                    object_buffer.push(new_array);
-                    state
-                },
-                b']' => {
-                    if this_object_type == PDFComplexObject::Array {
-                        return make_array_from_object_buffer(object_buffer, index)
-                    } else {
-                        println!("-------Array ended but I'm a {:?}", this_object_type);
-                        return Err(PDFError {
-                            message: "Invalid terminator: ]", location: index
-                        }) 
-                    }
-                },
-                b'<' if peek_ahead_by_n(&bytes, index, 1) == Some(b'<') => {
-                    if this_object_type == PDFComplexObject::Unknown {
-                        this_object_type = PDFComplexObject::Dict;
-                        index += 1;
-                        println!("Dict started at: {}", index);
-                    } else {
-                        println!("Nested dict in {:?} at {}", this_object_type, index);
-                        let (new_dict, end_index) = parse_object(&bytes, index)?;
-                        index = end_index;
-                        //println!("Nested dict closed at {}", index);
-                        object_buffer.push(new_dict);
-                    };
-                    state
-                },
-                b'<' => { ParserState::HexString },
-                b'>' if (peek_ahead_by_n(&bytes, index, 1) == Some(b'>')) => {
-                    if this_object_type == PDFComplexObject::Dict {
-                        return make_dict_from_object_buffer(object_buffer, index + 1)
-                    } else {
-                        println!("-------Dictionary ended but I'm a {:?}", this_object_type);
-                        println!("Buffer: {:#?}", object_buffer);
-                        return Err(PDFError {
-                            message: "Invalid terminator: >>", location: index
-                        }) 
-                    }
-                },
-                b'(' => { ParserState::CharString(0) },
-                b'/' => { ParserState::Name },
-                b'R' => {
-                    let object_buffer_length = object_buffer.len();
-                    if object_buffer_length <= 1 {
-                        return Err(PDFError{ message: "Could not parse reference to object", location: index })
-                    };
-                    let new_object = match object_buffer[(object_buffer_length - 2)..object_buffer_length] {
-                        [PDFObj::NumberInt(n1), PDFObj::NumberInt(n2)] if n1 >= 0 && n2 >= 0 => PDFObj::ObjectRef {
-                            id_number: n1 as u32, gen_number: n2 as u16
-                        },
-                        _ => return Err(PDFError{ message: "Could not parse reference to object", location: index })
-                    };
-                    object_buffer.truncate(object_buffer_length - 2);
-                    object_buffer.push(new_object);
-                    state
-                },
-                b's' | b'e' | b'o' | b'n' | b't' | b'f' => {
-                    char_buffer.push(c);
-                    ParserState::Keyword
-                },
-                b'0'..= b'9' | b'+' | b'-' => { index -= 1; ParserState::Number },
-                _ if is_whitespace(c) => state,
-                _ => { println!("Invalid character: {}", c as char); return Err(PDFError {
-                    message: "Invalid character", location: index
-                }) }
-            },
-            ParserState::HexString => match c {
-                b'>' => {
-                    object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
-                    ParserState::Neutral
-                },
-                b'0'..=b'9' | b'A'..=b'F' => {
-                    char_buffer.push(c);
-                    state
-                },
-                _ if is_whitespace(c) => state,
-                _ => return Err(PDFError{ message: "invalid character in hexstring", location: index })
-            },
-            ParserState::CharString(depth) => match c {
-                b')' if depth == 0 => {
-                    object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
-                    ParserState::Neutral
-                },
-                b')' if depth > 0 => ParserState::CharString(depth - 1),
-                b'(' => ParserState::CharString(depth + 1),
-                b'\\' if index + 1 < length => {
-                    match bytes[index + 1] {
-                        15 => {
-                            index += 1; // Skip carriage return
-                            if index + 1 < length && bytes[index + 1] == 12 { index += 1}; // Skip linefeed too
-                            state
-                        },
-                        12 => {index += 1; state}, // Escape naked LF
-                        b'\\' => {
-                            index += 1;
-                            char_buffer.push(b'\\');
-                            state
-                        },
-                        b'(' => {
-                            index += 1;
-                            char_buffer.push(b'(');
-                            state
-                        },
-                        b')' => {
-                            index += 1;
-                            char_buffer.push(b')');
-                            state
-                        },
-                        d @ b'0'..=b'7' => {
-                            index += 1;
-                            let mut code = d - b'0'; 
-                            if index + 1 < length && is_octal(bytes[index + 1]) {
-                                code = code * 8 + (bytes[index + 1] - b'0');
-                                index += 1;
-                                if index + 1 < length && is_octal(bytes[index + 1]) {
-                                    code = code * 8 + (bytes[index + 1] - b'0');
-                                    index += 1;
-                                }
-                            };
-                            char_buffer.push(code);
-                            state
-                        },
-                        _ => state // Other escaped characters do not require special treatment
-                    }
-                },
-                _ => { char_buffer.push(c); state}
-            },
-            ParserState::Name => {
-                if c != b'%' && (is_whitespace(c) || is_delimiter(c)) {
-                    object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
-                    index -= 1; // Need to parse delimiter character on next iteration
-                    ParserState::Neutral
-                } else {
-                    char_buffer.push(c);
-                    state
-                }
-            },
-            ParserState::Number => match c {
-                b'0'..=b'9' => {
-                    char_buffer.push(c);
-                    state
-                },
-                b'-' | b'+' if char_buffer.len() == 0 => {
-                    char_buffer.push(c);
-                    state
-                },
-                b'.' => {
-                    if char_buffer.contains(&b'.') {
-                        return Err(PDFError { message: "two decimal points in number", location: index }) };
-                    char_buffer.push(c);
-                    state
-                },
-                _ if is_whitespace(c) || is_delimiter(c) => {
-                    object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
-                    index -= 1; // Need to parse delimiter character on next iteration
-                    ParserState::Neutral
-                },
-                _ => return Err(PDFError { message: "invalid character in number", location: index }) 
-            },
-            ParserState::Comment => {
-                if is_EOL(c) {
-                    object_buffer.push( flush_buffer_to_object(&state, &mut char_buffer)? );
-                    ParserState::Neutral
-                } else {
-                    char_buffer.push(c);
-                    state
-                }
-            },
-            ParserState::Keyword => {
-                if !is_body_keyword_letter(c) {
-                    if !(is_delimiter(c) || is_whitespace(c)) {
-                        return Err(PDFError{ message: "Invalid character in keyword", location: index})
-                    };
-                    let this_keyword = flush_buffer_to_object(&state, &mut char_buffer)?;
-                    match this_keyword {
-                        PDFObj::Keyword(PDFKeyword::EndObj) => {
-                            if this_object_type == PDFComplexObject::IndirectObj {
-                                return make_object_from_object_buffer(object_buffer, index)
-                            } else {
-                                return Err(
-                                    PDFError{ message: "Encountered endobj outside indirect object", location: index})
-                            };
-                        },
-                        PDFObj::Keyword(PDFKeyword::Stream) => {
-                            return make_stream_object(&bytes, object_buffer, index)
-                        },
-                        PDFObj::Keyword(PDFKeyword::Obj) if this_object_type != PDFComplexObject::Unknown => 
-                            return Err(
-                                PDFError{ message: "Encountered nested obj declaration", location: index}
-                            ),
-                        PDFObj::Keyword(PDFKeyword::Obj) => {
-                            this_object_type = PDFComplexObject::IndirectObj;
-                            index -= 1;
-                            println!("parsing an object");
-                            ParserState::Neutral
-                        },
-                        PDFObj::Keyword(_) => {
-                            object_buffer.push(this_keyword);
-                            index -= 1;
-                            ParserState::Neutral
-                        },
-                        _ =>{
-                            return Err(PDFError{
-                                message: "Not a recognized keyword", location: index
-                            })
-                        }
-                    }
-                } else {
-                    char_buffer.push(c);
-                    state
-                }
-            }
-        };
-        index += 1;
-    };
+
+
+fn parse_ext_ascii(c: u8) -> char {
+    match c {
+        0..=127 => c as char,
+        128 => 'Ç',
+        129 => 'ü',
+        130 => 'é',
+        131 => 'â',
+        132 => 'ä',
+        133 => 'à',
+        134 => 'å',
+        135 => 'ç',
+        136 => 'ê',
+        137 => 'è',
+        138 => 'è',
+        139 => 'ï',
+        140 => 'î',
+        141 => 'ì',
+        142 => 'Ä',
+        143 => 'Å',
+        144 => 'É',
+        145 => 'æ',
+        146 => 'Æ',
+        147 => 'ô',
+        148 => 'ö',
+        149 => 'ò',
+        150 => 'û',
+        151 => 'ù',
+        152 => 'ÿ',
+        153 => 'Ö',
+        154 => 'Ü',
+        155 => '¢',
+        156 => '£',
+        157 => '¥',
+        158 => '₧',
+        159 => 'ƒ',
+        160 => 'á',
+        161 => 'í',
+        162 => 'ó',
+        163 => 'ú',
+        164 => 'ñ',
+        165 => 'Ñ',
+        166 => 'ª',
+        167 => 'º',
+        _ => '?'
+    }
 }
+
+
 
 
 fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result<PDFObj, PDFError> {
@@ -496,9 +548,7 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
             PDFObj::HexString(buffer.clone() as Vec<u8>)
         },
         ParserState::CharString(0) => {
-            println!("Vec: {:?}", buffer);
-
-            PDFObj::CharString(str::from_utf8(buffer).unwrap().to_string())
+            PDFObj::CharString(String::from_utf8_lossy(buffer).into_owned())
         },
         ParserState::CharString(_c) => {
             return Err(PDFError{ message: "Asked to create string with unclosed parens", location: 0 });
@@ -541,7 +591,7 @@ fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) ->
     loop {
         let key = match object_it.next() {
             None => {
-                println!("completed a dict: {:?}", dict);
+                //println!("completed a dict: {:?}", dict);
                 return Ok((PDFObj::Dictionary(Box::new(dict)), end_index))
             },
             Some(PDFObj::Name(s)) => s,
@@ -568,7 +618,7 @@ fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usi
         _ => return Err(PDFError{ message: "invalid generation number", location: 0})
     }; 
     return Ok((PDFObj::IndirectObject{
-        id_number, gen_number, object: Box::new(object_buffer.pop().unwrap())
+        id: ObjectID(id_number, gen_number), object: Box::new(object_buffer.pop().unwrap())
     }, end_index))
 }
 
@@ -608,7 +658,7 @@ fn make_stream_object(bytes: &Vec<u8>, mut object_buffer: Vec<PDFObj>, index: us
         return Err(PDFError{ message: "Reported binary content length too long", location: binary_start_index})
     };
     Ok((PDFObj::IndirectObject{
-        id_number, gen_number, object: Box::new(
+        id: ObjectID(id_number, gen_number), object: Box::new(
             PDFObj::Stream(
                 stream_dict,
                 Vec::from(&bytes[binary_start_index..(binary_start_index + binary_length + 1)])))
@@ -651,7 +701,7 @@ fn is_letter(c: u8) -> bool {
 
 fn is_body_keyword_letter(c: u8) -> bool {
     match c {
-        b'e' | b'n' | b'd' | b's' | b't' | b'r' | b'a' | b'm' | b'o' | b'b' | b'j' | b'u' | b'l' | b'u' | b'f' => true,
+        b'e' | b'n' | b'd' | b's' | b't' | b'r' | b'a' | b'm' | b'o' | b'b' | b'j' | b'u' | b'l' | b'f' => true,
         _ => false
     }
 }
