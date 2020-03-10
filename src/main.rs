@@ -26,12 +26,11 @@ enum PDFObj {
     CharString(String),
     HexString(Vec<u8>),
     Array(Vec<PDFObj>),
-    Dictionary(Box<HashMap<String, PDFObj>>),
-    Stream(Box<HashMap<String, PDFObj>>, Vec<u8>),
+    Dictionary(HashMap<String, PDFObj>),
+    Stream(HashMap<String, PDFObj>, Vec<u8>),
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
-    IndirectObject{ id: ObjectID, object: Box<PDFObj> },
 }
 
 
@@ -52,9 +51,7 @@ impl fmt::Display for PDFObj {
             Comment(s) => write!(f, "Comment: {:?}", s),
             Keyword(kw) => write!(f, "Keyword: {:?}", kw),
             ObjectRef(ObjectID(id_number, gen_number)) => 
-                write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number),
-            IndirectObject{ id: ObjectID(id_number, gen_number), object} => 
-                write!(f, "Object with id {} and gen {}: {}", id_number, gen_number, object)
+                write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number)
         };
         Ok(())
     }
@@ -71,6 +68,7 @@ impl fmt::Display for ObjectID {
 
 }
 
+#[derive(Debug)]
 enum PageNode<'a> {
     Root{ object: ObjectID, kids: Vec<PageNode<'a>> },
     Interior{ object: ObjectID, kids: Vec<PageNode<'a>>, parent: &'a PageNode<'a> },
@@ -111,6 +109,7 @@ impl fmt::Debug for PDFError {
     }
 }
 
+#[derive(Debug)]
 struct Page {}
 
 struct PDF {
@@ -151,17 +150,34 @@ impl PDF {
         Ok(pdf)
     }
 
-    fn build_page_tree<'a>(&mut self) -> Result<&PageNode<'a>, PDFError> {
-        let catalog_ref;
-        if let PDFObj::Dictionary(trailer_dict) = self.trailer.expect("Parse trailer first!").trailer_dict {
-            let catalog_ref = match trailer_dict.get("Root") {
-                Some(PDFObj::ObjectRef(obj_ref)) => obj_ref,
-                _ => return Err(PDFError{ message: "No /Root entry in trailer", location: 0})
-            };
-        } else {return Err(PDFError{ message: "Error processing trailer", location: 0})};
-        let catalog_object = self.get_hashmap_from_indirect_dict(catalog_ref)?;
-        let mut root = PageNode::Root{ object: catalog_ref, kids: Vec::new() };
-        Ok(&root)        
+    fn build_page_tree<'a>(&mut self) -> Result<PageNode<'a>, PDFError> {
+        let trailer_dict = match &self.trailer.as_ref().expect("Parse trailer first!").trailer_dict {
+            PDFObj::Dictionary(trailer_dict) => trailer_dict,
+            _ => return Err(PDFError{ message: "Error processing trailer", location: 0})
+        };
+        let catalog_ref = match trailer_dict.get("Root") {
+            Some(PDFObj::ObjectRef(obj_ref)) => obj_ref,
+            _ => return Err(PDFError{ message: "No /Root entry in trailer", location: 0})
+        };
+        let mut root = PageNode::Root{ object: *catalog_ref, kids: Vec::new() };
+        Ok(root)        
+    }
+
+    fn extend_page_tree<'a>(&mut self, node: &mut PageNode) -> Result<PageNode<'a>, PDFError> {
+        let node_id = match node {
+            PageNode::Root{object, ..} => object,
+            PageNode::Interior{object, ..} => object,
+            PageNode::Leaf{object, ..} => object,
+        };
+        let node_dict = match self.get_object(node_id) {
+            Ok(PDFObj::Dictionary(map)) => map,
+            _ => return Err(PDFError{ message: "Could not find node dictionary", location: 0})
+        };
+        let parent = node_dict.get("Parent").expect("Non-root nodes must have parents");
+        let kids = node_dict.get("Kids");
+        match kids {
+            None => return Ok(node)
+        }
     }
 
     fn get_object(&mut self, id: &ObjectID) -> Result<&PDFObj, PDFError> {
@@ -174,21 +190,10 @@ impl PDF {
             self.object_map.insert(*id, new_obj);
         };
         let object_to_return = match self.object_map.get(id) {
-            Some(PDFObj::IndirectObject{id: _, object: ref obj}) => obj,
+            Some(obj) => obj,
             _ => return Err(PDFError {message: "Expected an indirect object", location: 0 })
         };
         Ok(object_to_return)
-    }
-
-    fn get_hashmap_from_indirect_dict<'a>(&self, obj: &'a PDFObj) -> Result<&'a HashMap<String, PDFObj>, PDFError> {
-        let dict = match obj {
-            PDFObj::IndirectObject{object: d, ..} => d,
-            _ => return Err(PDFError{ message: "Could not extract a dictionary from object", location: 0 })
-        };
-        match dict {
-            &PDFObj::Dictionary(map) => Ok(&map),
-            _ => Err(PDFError{ message: "Could not extract a dictionary from object", location: 0 })
-        }
     }
 
     fn find_trailer_index(&self) -> Result<usize, PDFError> {
@@ -554,12 +559,8 @@ impl PDF {
         if binary_start_index + binary_length >= self.bytes.len() {
             return Err(PDFError{ message: "Reported binary content length too long", location: binary_start_index})
         };
-        Ok((PDFObj::IndirectObject{
-            id: ObjectID(id_number, gen_number), object: Box::new(
-                PDFObj::Stream(
-                    stream_dict,
-                    Vec::from(&self.bytes[binary_start_index..(binary_start_index + binary_length + 1)])))
-            },
+        Ok((PDFObj::Stream(stream_dict,
+                          Vec::from(&self.bytes[binary_start_index..(binary_start_index + binary_length + 1)])),
             binary_start_index + binary_length + 9))
     }
     
@@ -568,20 +569,22 @@ impl PDF {
 
 
 fn main(){
-    make_pdf("data/simple_pdf.pdf");
+    let pdf = make_pdf("data/document.pdf");
+    let root = pdf.unwrap().build_page_tree();
+    println!("{:?}", root);
 }
 
 #[test]
 fn test_sample_pdfs() {
     make_pdf("data/simple_pdf.pdf");
-    make_pdf("data/CCI01212020.pdf");
+    //make_pdf("data/CCI01212020.pdf");
     make_pdf("data/document.pdf");
     make_pdf("data/2018W2.pdf");
 }
 
-fn make_pdf(file_name: &str) {
+fn make_pdf(file_name: &str) -> Result<PDF, PDFError> {
     let raw_pdf = fs::read(file_name).expect("Could not read data!");
-    let pdf = PDF::create_PDF_from_file(raw_pdf);
+    Ok(PDF::create_PDF_from_file(raw_pdf)?)
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -667,7 +670,7 @@ fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) ->
         let key = match object_it.next() {
             None => {
                 //println!("completed a dict: {:?}", dict);
-                return Ok((PDFObj::Dictionary(Box::new(dict)), end_index))
+                return Ok((PDFObj::Dictionary(dict), end_index))
             },
             Some(PDFObj::Name(s)) => s,
             _ => return Err(PDFError{ message: "Dictionary key was not a Name", location: end_index})
@@ -693,9 +696,7 @@ fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usi
         PDFObj::NumberInt(i) => i as u16,
         _ => return Err(PDFError{ message: "invalid generation number", location: 0})
     }; 
-    return Ok((PDFObj::IndirectObject{
-        id: ObjectID(id_number, gen_number), object: Box::new(object_buffer.pop().unwrap())
-    }, end_index))
+    return Ok((object_buffer.pop().unwrap(), end_index))
 }
 
 
