@@ -31,7 +31,7 @@ enum PDFObj {
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
-    IndirectObject{ id: ObjectID, object:Box<PDFObj> },
+    IndirectObject{ id: ObjectID, object: Box<PDFObj> },
 }
 
 
@@ -61,20 +61,220 @@ impl fmt::Display for PDFObj {
 
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Hash, PartialEq, Eq, Copy, Clone)]
 struct ObjectID(u32, u16);
 
-struct ObjectMap {
-    index_map: HashMap<ObjectID, usize>,
-    object_map: HashMap<ObjectID, PDFObj>
+impl fmt::Display for ObjectID {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Object {} {}", self.0, self.1)
+    }
+
 }
 
-impl ObjectMap {
-    fn parse_object(bytes: &Vec<u8>, start_index: usize) -> Result<(PDFObj, usize), PDFError> {
+enum PageNode<'a> {
+    Root{ object: ObjectID, kids: Vec<PageNode<'a>> },
+    Interior{ object: ObjectID, kids: Vec<PageNode<'a>>, parent: &'a PageNode<'a> },
+    Leaf{ object: ObjectID, page: Page, parent: &'a PageNode<'a> }
+}
+
+#[derive(Debug, PartialEq)]
+enum PDFComplexObject {
+    Unknown,
+    Dict,
+    Array,
+    IndirectObj
+}
+
+#[derive(Debug)]
+struct PDFTrailer {
+    start_index: usize,
+    trailer_dict: PDFObj,
+    xref_index: usize
+}
+
+
+struct PDFError {
+    message: &'static str,
+    location: usize
+}
+
+
+impl fmt::Display for PDFError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PDF Processing Error: {} at {}", self.message, self.location)
+    }
+}
+
+impl fmt::Debug for PDFError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PDF Processing Error: {} at {}", self.message, self.location)
+    }
+}
+
+struct Page {}
+
+struct PDF {
+    bytes: Vec<u8>,
+    version: Option<PDFVersion>,
+    trailer: Option<PDFTrailer>,
+    index_map: HashMap<ObjectID, usize>,
+    object_map: HashMap<ObjectID, PDFObj>,
+}
+
+impl PDF {
+
+    fn create_PDF_from_file(bytes: Vec<u8>) -> Result<PDF, PDFError> {
+        let mut pdf = PDF{
+            bytes, version: None, trailer: None,
+            index_map: HashMap::new(), object_map: HashMap::new()
+        };
+        
+        let trailer_index = pdf.find_trailer_index()?;
+        println!("trailer starts at: {:?}", trailer_index);
+        pdf.trailer = Some(pdf.process_trailer(trailer_index)?);
+        match pdf.process_xref_table() {
+            None => {},
+            Some(e) => return Err(e)
+        };
+        let objects_to_add: Vec<(ObjectID, usize)> = pdf.index_map.iter().map(|(a, b)| (*a, *b)).collect();
+        for (object_number, index) in objects_to_add {
+            match pdf.get_object(&object_number) {
+                Ok(obj) => {} // println!("Obj #{}: {}", object_number, obj),
+                Err(e) => {
+                    println!("Obj #{}: {:?}", object_number, e);
+                    let prev_characters: Vec<char> = pdf.bytes[(e.location - 10)..e.location].iter().map(|c| *c as char).collect();
+                    let next_characters: Vec<char> = pdf.bytes[e.location..(e.location + 10)].iter().map(|c| *c as char).collect();
+                    println!("{:?} | {:?}", prev_characters, next_characters);
+                }
+            };
+        };
+        Ok(pdf)
+    }
+
+    fn build_page_tree<'a>(&mut self) -> Result<&PageNode<'a>, PDFError> {
+        let catalog_ref;
+        if let PDFObj::Dictionary(trailer_dict) = self.trailer.expect("Parse trailer first!").trailer_dict {
+            let catalog_ref = match trailer_dict.get("Root") {
+                Some(PDFObj::ObjectRef(obj_ref)) => obj_ref,
+                _ => return Err(PDFError{ message: "No /Root entry in trailer", location: 0})
+            };
+        } else {return Err(PDFError{ message: "Error processing trailer", location: 0})};
+        let catalog_object = self.get_hashmap_from_indirect_dict(catalog_ref)?;
+        let mut root = PageNode::Root{ object: catalog_ref, kids: Vec::new() };
+        Ok(&root)        
+    }
+
+    fn get_object(&mut self, id: &ObjectID) -> Result<&PDFObj, PDFError> {
+        if !self.object_map.contains_key(id) {
+            let index = match self.index_map.get(id) {
+                None => return Err(PDFError{ message: "object not found", location: 0}),
+                Some(i) => i
+            };
+            let (new_obj, _) = self.parse_object(*index)?;
+            self.object_map.insert(*id, new_obj);
+        };
+        let object_to_return = match self.object_map.get(id) {
+            Some(PDFObj::IndirectObject{id: _, object: ref obj}) => obj,
+            _ => return Err(PDFError {message: "Expected an indirect object", location: 0 })
+        };
+        Ok(object_to_return)
+    }
+
+    fn get_hashmap_from_indirect_dict<'a>(&self, obj: &'a PDFObj) -> Result<&'a HashMap<String, PDFObj>, PDFError> {
+        let dict = match obj {
+            PDFObj::IndirectObject{object: d, ..} => d,
+            _ => return Err(PDFError{ message: "Could not extract a dictionary from object", location: 0 })
+        };
+        match dict {
+            &PDFObj::Dictionary(map) => Ok(&map),
+            _ => Err(PDFError{ message: "Could not extract a dictionary from object", location: 0 })
+        }
+    }
+
+    fn find_trailer_index(&self) -> Result<usize, PDFError> {
+        let mut state: usize = 0;
+        let mut current_index = self.bytes.len() as usize;
+        while state < 7 {
+            current_index -= 1;
+            let c = self.bytes[current_index] as char;
+            //println!("char {} with {}", c, state);
+            state = match state {
+                1 if c == 'e' => 2,
+                2 if c == 'l' => 3,
+                3 if c == 'i' => 4,
+                4 if c == 'a' => 5,
+                5 if c == 'r' => 6,
+                6 if c == 't' => 7,
+                _ if c == 'r' => 1,
+                _ => 0
+            };
+    
+            if current_index + state <= 6 {
+                return Result::Err(PDFError {message: "Could not find trailer", location: current_index})
+            };
+        }
+        Result::Ok(current_index)
+    }
+
+    fn process_trailer(&mut self, start_index: usize) -> Result<PDFTrailer, PDFError> {
+        assert_eq!(&(String::from_utf8(Vec::from(&self.bytes[start_index..start_index + 7])).unwrap()), "trailer");
+        let (trailer_dict, next_index) = self.parse_object(start_index + 7)?;
+        let trailer_string = String::from_utf8(self.bytes[(next_index + 1)..].to_vec())
+                            .expect("Could not convert trailer to string!");
+        let mut trailer_lines = trailer_string
+                                .lines()
+                                .filter(|l| !l.trim().is_empty());
+        let first_line = trailer_lines.next().expect("No line after trailer dict!");
+        //println!("{}", trailer_string);
+        if first_line != "startxref" {
+            return Err(PDFError {message: "startxref keyword not found", location: next_index})
+        };
+        let second_line = trailer_lines.next().expect("No xref location in trailer");
+        let xref_index = second_line.trim().parse().expect("Invalid xref index in trailer");
+        let third_line = trailer_lines.next().expect("Missing file terminator!");
+        assert_eq!(third_line, "%%EOF");
+        assert_eq!(trailer_lines.next(), None);
+        return Ok(PDFTrailer {start_index, trailer_dict, xref_index})
+    }
+
+    fn process_xref_table(&mut self) -> Option<PDFError> {
+        let trailer = self.trailer.as_ref().expect("Parse trailer before parsing xref table!");
+        let start_index = trailer.xref_index;
+        let end_index = trailer.start_index - 1;
+        let table = String::from_utf8(self.bytes[start_index..end_index].to_vec()).expect("Invalid xref table");
+        let mut line_iter = table.lines();
+        let mut obj_number = 0;
+        assert_eq!(line_iter.next().unwrap(), "xref");
+        loop {
+            let line = match line_iter.next() {
+                Some(s) => s,
+                None => return None
+            };
+            //println!("{:?}", line);
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 3 {
+                if parts[2] == "f" { obj_number += 1} else {
+                    self.index_map.insert(
+                        ObjectID(obj_number, parts[1].parse().expect("Could not parse gen number")),
+                        parts[0].parse().expect("Could not parse offset")
+                    );
+                    obj_number += 1;
+                }
+             } else if parts.len() == 2 {
+                    obj_number = parts[0].parse().expect("Could not parse object number");
+                } else {
+                    println!("{:?}", parts);
+                    return Some(PDFError{ message: "Invalid line in xref table", location: 0})
+            }
+        };
+    }
+    
+
+    fn parse_object(&mut self, start_index: usize) -> Result<(PDFObj, usize), PDFError> {
         let mut state = ParserState::Neutral;
         let mut index = start_index;
         let mut this_object_type = PDFComplexObject::Unknown;
-        let length = bytes.len();
+        let length = self.bytes.len();
         if index > length { return Err(PDFError { message: "index out of range" , location: index })};
         let mut char_buffer = Vec::new();
         let mut object_buffer = Vec::new();
@@ -82,7 +282,7 @@ impl ObjectMap {
             if index > length {
                 return Err(PDFError { message: "end of file while parsing object" , location: index })
             };
-            let c = bytes[index];
+            let c = self.bytes[index];
             state = match state {
                 ParserState::Neutral => match c {
                     b'[' if this_object_type == PDFComplexObject::Unknown => {
@@ -90,7 +290,7 @@ impl ObjectMap {
                         state
                     },
                     b'[' => {
-                        let (new_array, end_index) = parse_object(&bytes, index)?;
+                        let (new_array, end_index) = self.parse_object(index)?;
                         index = end_index;
                         object_buffer.push(new_array);
                         state
@@ -105,14 +305,14 @@ impl ObjectMap {
                             }) 
                         }
                     },
-                    b'<' if peek_ahead_by_n(&bytes, index, 1) == Some(b'<') => {
+                    b'<' if peek_ahead_by_n(&self.bytes, index, 1) == Some(b'<') => {
                         if this_object_type == PDFComplexObject::Unknown {
                             this_object_type = PDFComplexObject::Dict;
                             index += 1;
                             //println!("Dict started at: {}", index);
                         } else {
                             //println!("Nested dict in {:?} at {}", this_object_type, index);
-                            let (new_dict, end_index) = parse_object(&bytes, index)?;
+                            let (new_dict, end_index) = self.parse_object(index)?;
                             index = end_index;
                             //println!("Nested dict closed at {}", index);
                             object_buffer.push(new_dict);
@@ -120,7 +320,7 @@ impl ObjectMap {
                         state
                     },
                     b'<' => { ParserState::HexString },
-                    b'>' if (peek_ahead_by_n(&bytes, index, 1) == Some(b'>')) => {
+                    b'>' if (peek_ahead_by_n(&self.bytes, index, 1) == Some(b'>')) => {
                         if this_object_type == PDFComplexObject::Dict {
                             //println!("Dictionary ended at {}", index + 1);
                             return make_dict_from_object_buffer(object_buffer, index + 1)
@@ -179,10 +379,10 @@ impl ObjectMap {
                     b')' if depth > 0 => ParserState::CharString(depth - 1),
                     b'(' => ParserState::CharString(depth + 1),
                     b'\\' if index + 1 < length => {
-                        match bytes[index + 1] {
+                        match self.bytes[index + 1] {
                             15 => {
                                 index += 1; // Skip carriage return
-                                if index + 1 < length && bytes[index + 1] == 12 { index += 1}; // Skip linefeed too
+                                if index + 1 < length && self.bytes[index + 1] == 12 { index += 1}; // Skip linefeed too
                                 state
                             },
                             12 => {index += 1; state}, // Escape naked LF
@@ -204,11 +404,11 @@ impl ObjectMap {
                             d @ b'0'..=b'7' => {
                                 index += 1;
                                 let mut code = d - b'0'; 
-                                if index + 1 < length && is_octal(bytes[index + 1]) {
-                                    code = code * 8 + (bytes[index + 1] - b'0');
+                                if index + 1 < length && is_octal(self.bytes[index + 1]) {
+                                    code = code * 8 + (self.bytes[index + 1] - b'0');
                                     index += 1;
-                                    if index + 1 < length && is_octal(bytes[index + 1]) {
-                                        code = code * 8 + (bytes[index + 1] - b'0');
+                                    if index + 1 < length && is_octal(self.bytes[index + 1]) {
+                                        code = code * 8 + (self.bytes[index + 1] - b'0');
                                         index += 1;
                                     }
                                 };
@@ -277,7 +477,7 @@ impl ObjectMap {
                                 };
                             },
                             PDFObj::Keyword(PDFKeyword::Stream) => {
-                                return make_stream_object(&bytes, object_buffer, index)
+                                return self.make_stream_object(object_buffer, index)
                             },
                             PDFObj::Keyword(PDFKeyword::Obj) if this_object_type != PDFComplexObject::Unknown => 
                                 return Err(
@@ -308,155 +508,81 @@ impl ObjectMap {
             index += 1;
         };
     }
+
+    fn make_stream_object(&mut self, mut object_buffer: Vec<PDFObj>, index: usize)
+            -> Result<(PDFObj, usize), PDFError> {
+        if object_buffer.len() != 3 {
+            return Err(PDFError{ message: "Expected stream to be preceded by a sole dictionary", location: index })
+        };
+        let binary_start_index = match self.bytes[index] {
+            b'\n' => index + 1,
+            b'\r' => {
+                if let Some(b'\n') = peek_ahead_by_n(&self.bytes, index, 1) {
+                    index + 2} else {
+                        return Err(PDFError{
+                            message: "Stream tag not followed by appropriate spacing", location: index
+                        })
+                    }
+                },
+            _ => return Err(PDFError{ message: "Stream tag not followed by appropriate spacing", location: index })
+        };
+        let stream_dict = match object_buffer.pop().unwrap() {
+            PDFObj::Dictionary(hash_map) => hash_map,
+            _ => return Err(PDFError{ message: "Stream preceded by a non-dictionary object", location: index })
+        };
+        //println!("{:#?}", stream_dict);
+        let id_number = match object_buffer[0] {
+            PDFObj::NumberInt(i) => i as u32,
+            _ => return Err(PDFError{ message: "invalid object number", location: 0})
+        };
+        let gen_number = match object_buffer[1] {
+            PDFObj::NumberInt(i) => i as u16,
+            _ => return Err(PDFError{ message: "invalid generation number", location: 0})
+        };
+        let binary_length = match stream_dict.get("Length") {
+            Some(PDFObj::NumberInt(binary_length)) => *binary_length as usize,
+            Some(PDFObj::ObjectRef(id)) => match self.get_object(id)? {
+                PDFObj::NumberInt(binary_length) => *binary_length as usize,
+                obj @ _ => {
+                    println!("{:?}", obj);
+                    return Err(PDFError{ message: "Could not find valid /Length key by ref", location: index })
+                }
+            },
+            _ => return Err(PDFError{ message: "Could not find valid /Length key", location: index })
+        };
+        // TODO: Confirm endstream included
+        if binary_start_index + binary_length >= self.bytes.len() {
+            return Err(PDFError{ message: "Reported binary content length too long", location: binary_start_index})
+        };
+        Ok((PDFObj::IndirectObject{
+            id: ObjectID(id_number, gen_number), object: Box::new(
+                PDFObj::Stream(
+                    stream_dict,
+                    Vec::from(&self.bytes[binary_start_index..(binary_start_index + binary_length + 1)])))
+            },
+            binary_start_index + binary_length + 9))
+    }
     
 }
 
-#[derive(Debug, PartialEq)]
-enum PDFComplexObject {
-    Unknown,
-    Dict,
-    Array,
-    IndirectObj
-}
 
-#[derive(Debug)]
-struct PDFTrailer {
-    trailer_dict: PDFObj,
-    xref_index: usize
-}
-
-struct PDF {
-    //version: PDFVersion,
-    trailer: PDFTrailer,
-}
-
-struct PDFError {
-    message: &'static str,
-    location: usize
-}
-
-
-impl fmt::Display for PDFError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PDF Processing Error: {} at {}", self.message, self.location)
-    }
-}
-
-impl fmt::Debug for PDFError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PDF Processing Error: {} at {}", self.message, self.location)
-    }
-}
 
 fn main(){
-    
-    //let raw_pdf = fs::read("data/simple_pdf.pdf").expect("Could not read data!");
-    //let raw_pdf = fs::read("data/CCI01212020.pdf").expect("Could not read data!");
-    let raw_pdf = fs::read("data/document.pdf").expect("Could not read data!");
-    //let raw_pdf = fs::read("data/2018W2.pdf").expect("Could not read data!");
-    println!("{}", raw_pdf.len());
-    let pdf = parse_pdf(raw_pdf).expect("Processing error");
-    
-
-    
+    make_pdf("data/simple_pdf.pdf");
 }
 
-fn parse_pdf(bytes: Vec<u8>) -> Result<PDF, PDFError> {
-    let trailer_index = find_trailer_index(&bytes)?;
-    println!("trailer starts at: {:?}", trailer_index);
-    let trailer = process_trailer(&bytes, trailer_index)?;
-    let xref_table = process_xref_table(&bytes, trailer.xref_index, trailer_index)?;
-    for (object_number, index) in xref_table {
-        match parse_object(&bytes, index) {
-            Ok((obj, _)) => {} // println!("Obj #{}: {}", object_number, obj),
-            Err(e) => {
-                println!("Obj #{}: {:?}", object_number, e);
-                let prev_characters: Vec<char> = bytes[(e.location - 10)..e.location].iter().map(|c| *c as char).collect();
-                let next_characters: Vec<char> = bytes[e.location..(e.location + 10)].iter().map(|c| *c as char).collect();
-                println!("{:?} | {:?}", prev_characters, next_characters);
-            }
-        };
-    }
-    Ok(PDF{ trailer })
-
+#[test]
+fn test_sample_pdfs() {
+    make_pdf("data/simple_pdf.pdf");
+    make_pdf("data/CCI01212020.pdf");
+    make_pdf("data/document.pdf");
+    make_pdf("data/2018W2.pdf");
 }
 
-fn find_trailer_index(bytes: &Vec<u8>) -> Result<usize, PDFError> {
-    let mut state: usize = 0;
-    let mut current_index = bytes.len() as usize;
-    while state < 7 {
-        current_index -= 1;
-        let c = bytes[current_index] as char;
-        //println!("char {} with {}", c, state);
-        state = match state {
-            1 if c == 'e' => 2,
-            2 if c == 'l' => 3,
-            3 if c == 'i' => 4,
-            4 if c == 'a' => 5,
-            5 if c == 'r' => 6,
-            6 if c == 't' => 7,
-            _ if c == 'r' => 1,
-            _ => 0
-        };
-
-        if current_index + state <= 6 {
-            return Result::Err(PDFError {message: "Could not find trailer", location: current_index})
-        };
-    }
-    Result::Ok(current_index)
+fn make_pdf(file_name: &str) {
+    let raw_pdf = fs::read(file_name).expect("Could not read data!");
+    let pdf = PDF::create_PDF_from_file(raw_pdf);
 }
-
-fn process_trailer(bytes: &Vec<u8>, start_index: usize) -> Result<PDFTrailer, PDFError> {
-    assert_eq!(&(String::from_utf8(Vec::from(&bytes[start_index..start_index + 8])).unwrap()), "trailer\n");
-    let (trailer_dict, next_index) = parse_object(&bytes, start_index + 7)?;
-    let trailer_string = String::from_utf8(bytes[(next_index + 1)..].to_vec())
-                        .expect("Could not convert trailer to string!");
-    let mut trailer_lines = trailer_string
-                            .lines()
-                            .filter(|l| !l.trim().is_empty());
-    let first_line = trailer_lines.next().expect("No line after trailer dict!");
-    //println!("{}", trailer_string);
-    if first_line != "startxref" {
-        return Err(PDFError {message: "startxref keyword not found", location: next_index})
-    };
-    let second_line = trailer_lines.next().expect("No xref location in trailer");
-    let xref_index = second_line.trim().parse().expect("Invalid xref index in trailer");
-    let third_line = trailer_lines.next().expect("Missing file terminator!");
-    assert_eq!(third_line, "%%EOF");
-    assert_eq!(trailer_lines.next(), None);
-    return Ok(PDFTrailer {trailer_dict, xref_index})
-}
-
-fn process_xref_table(bytes: &Vec<u8>, start_index:usize, end_index: usize) -> Result<HashMap<u32, usize>, PDFError> {
-    let mut table = String::from_utf8(bytes[start_index..end_index].to_vec()).expect("Invalid xref table");
-    let mut line_iter = table.lines();
-    let mut object_number_to_index = HashMap::new();
-    let mut obj_number = 0;
-    assert_eq!(line_iter.next().unwrap(), "xref");
-    loop {
-        let line = match line_iter.next() {
-            Some(s) => s,
-            None => return Ok(object_number_to_index)
-        };
-        println!("{:?}", line);
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() == 3 {
-            if parts[2] == "f" { obj_number += 1} else {
-                object_number_to_index.insert(
-                    obj_number,
-                    parts[0].parse().expect("Could not parse offset")
-                );
-                obj_number += 1;
-            }
-         } else if parts.len() == 2 {
-                obj_number = parts[0].parse().expect("Could not parse object number");
-            } else {
-                println!("{:?}", parts);
-                return Err(PDFError{ message: "Invalid line in xref table", location: 0})
-        }
-    };
-}
-
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum ParserState {
@@ -486,62 +612,11 @@ enum PDFKeyword {
     StartXRef
 }
 
-
-
-fn parse_ext_ascii(c: u8) -> char {
-    match c {
-        0..=127 => c as char,
-        128 => 'Ç',
-        129 => 'ü',
-        130 => 'é',
-        131 => 'â',
-        132 => 'ä',
-        133 => 'à',
-        134 => 'å',
-        135 => 'ç',
-        136 => 'ê',
-        137 => 'è',
-        138 => 'è',
-        139 => 'ï',
-        140 => 'î',
-        141 => 'ì',
-        142 => 'Ä',
-        143 => 'Å',
-        144 => 'É',
-        145 => 'æ',
-        146 => 'Æ',
-        147 => 'ô',
-        148 => 'ö',
-        149 => 'ò',
-        150 => 'û',
-        151 => 'ù',
-        152 => 'ÿ',
-        153 => 'Ö',
-        154 => 'Ü',
-        155 => '¢',
-        156 => '£',
-        157 => '¥',
-        158 => '₧',
-        159 => 'ƒ',
-        160 => 'á',
-        161 => 'í',
-        162 => 'ó',
-        163 => 'ú',
-        164 => 'ñ',
-        165 => 'Ñ',
-        166 => 'ª',
-        167 => 'º',
-        _ => '?'
-    }
-}
-
-
-
-
 fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result<PDFObj, PDFError> {
     let new_obj = match state {
         ParserState::Neutral => return Err(PDFError {message: "called flush buffer in Neutral context", location: 0}),
         ParserState::HexString => {
+            //TODO: ADD PADDING
             for c in buffer.iter() {
                 if !is_hex(*c) { return Err(PDFError { message: "invalid character in hex string", location: 0}) };
             };
@@ -605,7 +680,8 @@ fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) ->
     } 
 }
 
-fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
+fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usize)
+        -> Result<(PDFObj, usize), PDFError> {
     if object_buffer.len() != 3 {
         return Err(PDFError{ message: "Object tags contained multiple or no objects", location: end_index })
     };
@@ -620,50 +696,6 @@ fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usi
     return Ok((PDFObj::IndirectObject{
         id: ObjectID(id_number, gen_number), object: Box::new(object_buffer.pop().unwrap())
     }, end_index))
-}
-
-fn make_stream_object(bytes: &Vec<u8>, mut object_buffer: Vec<PDFObj>, index: usize)
-        -> Result<(PDFObj, usize), PDFError> {
-    if object_buffer.len() != 3 {
-        return Err(PDFError{ message: "Expected stream to be preceded by a sole dictionary", location: index })
-    };
-    let binary_start_index = match bytes[index] {
-        b'\n' => index + 1,
-        b'\r' => {
-            if let Some(b'\n') = peek_ahead_by_n(&bytes, index, 1) {
-                index + 2} else {
-                    return Err(PDFError{ message: "Stream tag not followed by appropriate spacing", location: index })
-                }
-            },
-        _ => return Err(PDFError{ message: "Stream tag not followed by appropriate spacing", location: index })
-    };
-    let stream_dict = match object_buffer.pop().unwrap() {
-        PDFObj::Dictionary(hash_map) => hash_map,
-        _ => return Err(PDFError{ message: "Stream preceded by a non-dictionary object", location: index })
-    };
-    let id_number = match object_buffer[0] {
-        PDFObj::NumberInt(i) => i as u32,
-        _ => return Err(PDFError{ message: "invalid object number", location: 0})
-    };
-    let gen_number = match object_buffer[1] {
-        PDFObj::NumberInt(i) => i as u16,
-        _ => return Err(PDFError{ message: "invalid generation number", location: 0})
-    };
-    let binary_length = match stream_dict.get("Length") {
-        Some(PDFObj::NumberInt(binary_length)) => *binary_length as usize,
-        _ => return Err(PDFError{ message: "Could not find valid /Length key", location: index })
-    };
-    // TODO: Confirm endstream included
-    if binary_start_index + binary_length >= bytes.len() {
-        return Err(PDFError{ message: "Reported binary content length too long", location: binary_start_index})
-    };
-    Ok((PDFObj::IndirectObject{
-        id: ObjectID(id_number, gen_number), object: Box::new(
-            PDFObj::Stream(
-                stream_dict,
-                Vec::from(&bytes[binary_start_index..(binary_start_index + binary_length + 1)])))
-        },
-        binary_start_index + binary_length + 9))
 }
 
 

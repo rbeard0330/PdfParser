@@ -1,6 +1,5 @@
 /target
 /data/CCI01212020.pdf
-/data/simple_pdf.pdf
 /rust_ws.code-workspace
 .vscode/tasks.json
 .vscode/settings.json
