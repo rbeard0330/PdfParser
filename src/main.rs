@@ -1,5 +1,7 @@
 mod pdf_file;
 use self::pdf_file::*;
+use std::rc::Rc;
+use pdf_file::{PDFError};
 
 struct PdfDoc {
     file: PdfFileHandler,
@@ -10,8 +12,8 @@ impl PdfDoc {
         let mut objects_to_visit = Vec::new();
         let root = self.file.get_root()?;
         let pages = root.get_dict_ref()?.get("Pages").unwrap();
-        let page_ref = match pages {
-            PDFObj::ObjectRef(id) => *id,
+        let page_ref = match **pages {
+            PDFObj::ObjectRef(id) => id,
             _ => return Err(PDFError{message: "No reference to Pages".to_string(), function: "parse_page_tree"})
         };
         drop(root);
@@ -21,24 +23,22 @@ impl PdfDoc {
             let this_obj = objects_to_visit.pop();
             let this_ref = match this_obj {
                 None => {break},
-                Some(PDFObj::ObjectRef(id)) => id,
-                _ => {panic!();}
+                Some(ref obj) => match **obj {
+                    PDFObj::ObjectRef(id) => id,
+                    _ => {panic!();}
+                }
             };
-            let dict = match self.file.get_object(this_ref).unwrap() {
-                PDFObj::Dictionary(ref hash_map) => hash_map,
-                o @ _ => {println!("{:?}", o);
-            panic!();},
+            let kids_array = match &*(self.file.get_object(&this_ref).unwrap()) {
+                &PDFObj::Dictionary(ref hash_map) => Rc::clone(hash_map.get("Kids").unwrap()),
+                o @ _ => {
+                    println!("{:?}", o);
+                    panic!();},
             };
-            println!("{:?}", dict);
-            let kids_array = dict.get("Kids");
-            match kids_array {
-                None => {},
-                Some(PDFObj::Array(ref v)) => {
-                    objects_to_visit.extend(v);
-                },
-                _ => {}
-            }
-    
+            match &*kids_array {
+                    &PDFObj::Array(ref v) => {objects_to_visit.extend(v.clone());},
+                    _ => {}
+                    
+                }
         }
         Ok(())
 
@@ -63,7 +63,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    const TEST_PDFS: [&str; 4] = ["data/simple_pdf.pdf", "data/CCI01212020.pdf",
+    const TEST_PDFS: [&str; 3] = ["data/simple_pdf.pdf",// "data/CCI01212020.pdf",
         "data/document.pdf", "data/2018W2.pdf"];
     
     #[test]

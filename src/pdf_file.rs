@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::str;
+use std::rc::Rc;
 
 use PDFObj::*;
 
@@ -10,7 +11,7 @@ pub struct PdfFileHandler {
     version: Option<PDFVersion>,
     trailer: Option<PDFTrailer>,
     index_map: HashMap<ObjectID, usize>,
-    object_map: HashMap<ObjectID, PDFObj>,
+    object_map: HashMap<ObjectID, Rc<PDFObj>>,
 }
 
 impl PdfFileHandler {
@@ -37,28 +38,33 @@ impl PdfFileHandler {
         Ok(pdf)
     }
 
-    pub fn get_root(&mut self) -> Result<&PDFObj, PDFError> {
+    pub fn get_root(&mut self) -> Result<Rc<PDFObj>, PDFError> {
         let trailer_dict = match &self.trailer.as_ref().expect("Parse trailer first!").trailer_dict {
             Dictionary(trailer_dict) => trailer_dict,
             _ => return Err(PDFError{ message: "Error processing trailer".to_string(), function: "build_page_tree"})
         };
         
         let catalog_ref = match trailer_dict.get("Root") {
-            Some(ObjectRef(obj_ref)) => *obj_ref,
+            Some(val) => {
+                match **val {
+                    ObjectRef(obj_ref) => obj_ref,
+                    _ => return Err(PDFError{ message: "/Root entry not ref".to_string(), function: "build_page_tree"})
+                }
+            },
             _ => return Err(PDFError{ message: "No /Root entry in trailer".to_string(), function: "build_page_tree"})
         };
         drop(trailer_dict);
         self.get_object(&catalog_ref)
     }
 
-    pub fn get_object(&mut self, id: &ObjectID) -> Result<&PDFObj, PDFError> {
+    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
         if !self.object_map.contains_key(id) {
             let index = match self.index_map.get(id) {
                 None => return Err(PDFError{ message: format!("object {} not found", id), function: "get_object"}),
                 Some(i) => i
             };
             let (new_obj, _) = self.parse_object(*index)?;
-            self.object_map.insert(*id, new_obj);
+            self.object_map.insert(*id, Rc::new(new_obj));
         };
         let object_to_return = match self.object_map.get(id) {
             Some(obj) => obj,
@@ -66,7 +72,7 @@ impl PdfFileHandler {
                 message: format!("Expected {} to be an indirect object", id), function: "get_object"
             })
         };
-        Ok(object_to_return)
+        Ok(Rc::clone(object_to_return))
     }
 
     fn find_trailer_index(&self) -> Result<usize, PDFError> {
@@ -124,6 +130,7 @@ impl PdfFileHandler {
         let start_index = trailer.xref_index;
         let end_index = trailer.start_index - 1;
         let table = String::from_utf8(self.bytes[start_index..end_index].to_vec()).expect("Invalid xref table");
+        println!("{}", table);
         let mut line_iter = table.lines();
         let mut obj_number = 0;
         assert_eq!(line_iter.next().unwrap(), "xref");
@@ -436,11 +443,15 @@ impl PdfFileHandler {
                 message: format!("Stream tag not followed by appropriate spacing at {}", index),
                 function: "make_stream_object"
             })};
-        let stream_dict = match object_buffer.pop().unwrap() {
+        let wrapped_stream_dict = match object_buffer.pop().unwrap() {
             PDFObj::Dictionary(hash_map) => hash_map,
             _ => return Err(PDFError{
                 message: format!("Stream at {} preceded by a non-dictionary object", index),
                 function: "make_stream_object" })};
+        let mut stream_dict = HashMap::new();
+        for (key, value) in wrapped_stream_dict {
+            stream_dict.insert(key, Rc::try_unwrap(value).unwrap());
+        }
         //println!("{:#?}", stream_dict);
         let id_number = match object_buffer[0] {
             PDFObj::NumberInt(i) => i as u32,
@@ -452,8 +463,8 @@ impl PdfFileHandler {
         };
         let binary_length = match stream_dict.get("Length") {
             Some(PDFObj::NumberInt(binary_length)) => *binary_length as usize,
-            Some(PDFObj::ObjectRef(id)) => match self.get_object(id)? {
-                PDFObj::NumberInt(binary_length) => *binary_length as usize,
+            Some(PDFObj::ObjectRef(id)) => match &*(self.get_object(id)?) {
+                &PDFObj::NumberInt(binary_length) => binary_length as usize,
                 obj @ _ => {
                     println!("{:?}", obj);
                     return Err(PDFError{ message: "Could not find valid /Length key by ref".to_string(),
@@ -496,8 +507,8 @@ pub enum PDFObj {
     Name(String),
     CharString(String),
     HexString(Vec<u8>),
-    Array(Vec<PDFObj>),
-    Dictionary(HashMap<String, PDFObj>),
+    Array(Vec<Rc<PDFObj>>),
+    Dictionary(HashMap<String, Rc<PDFObj>>),
     Stream(HashMap<String, PDFObj>, Vec<u8>),
     Comment(String),
     Keyword(PDFKeyword),
@@ -505,9 +516,9 @@ pub enum PDFObj {
 }
 
 impl PDFObj {
-    pub fn get_dict_ref(&self) -> Result<&HashMap<String, PDFObj>, PDFError> {
+    pub fn get_dict_ref(&self) -> Result<&HashMap<String, Rc<PDFObj>>, PDFError> {
         match self {
-            Dictionary(map) | Stream(map, ..) => Ok(&map),
+            Dictionary(map) => Ok(&map),
             _ => Err(PDFError{message: format!("No dictionary in provided type: {}", self), function: "get_dict_ref" })
         }
     }
@@ -659,7 +670,11 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
 
 
 fn make_array_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
-    Ok((PDFObj::Array(object_buffer), end_index))
+    let mut new_vec = Vec::new();
+    for obj in object_buffer {
+        new_vec.push(Rc::new(obj));
+    }
+    Ok((PDFObj::Array(new_vec), end_index))
 }
 
 fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
@@ -680,7 +695,7 @@ fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) ->
                             function: "make_dict_from_object_buffer" }),
             Some(v) => v
         };
-        dict.insert(key, value);
+        dict.insert(key, Rc::new(value));
     } 
 }
 
