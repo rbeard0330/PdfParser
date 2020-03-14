@@ -1,3 +1,6 @@
+mod util;
+mod decode;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -5,10 +8,11 @@ use std::str;
 use std::rc::Rc;
 
 use PDFObj::*;
+use util::*;
 
 pub struct PdfFileHandler {
     bytes: Vec<u8>,
-    version: Option<PDFVersion>,
+    pub version: Option<PDFVersion>,
     trailer: Option<PDFTrailer>,
     index_map: HashMap<ObjectID, usize>,
     object_map: HashMap<ObjectID, Rc<PDFObj>>,
@@ -27,9 +31,9 @@ impl PdfFileHandler {
             bytes, version: None, trailer: None,
             index_map: HashMap::new(), object_map: HashMap::new(),
         };
-        
+        pdf.set_version()?;
         let trailer_index = pdf.find_trailer_index()?;
-        println!("trailer starts at: {:?}", trailer_index);
+        //println!("trailer starts at: {:?}", trailer_index);
         pdf.trailer = Some(pdf.process_trailer(trailer_index)?);
         match pdf.process_xref_table() {
             None => {},
@@ -57,7 +61,7 @@ impl PdfFileHandler {
         self.get_object(&catalog_ref)
     }
 
-    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_object_once(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
         if !self.object_map.contains_key(id) {
             let index = match self.index_map.get(id) {
                 None => return Err(PDFError{ message: format!("object {} not found", id), function: "get_object"}),
@@ -66,13 +70,102 @@ impl PdfFileHandler {
             let (new_obj, _) = self.parse_object(*index)?;
             self.object_map.insert(*id, Rc::new(new_obj));
         };
-        let object_to_return = match self.object_map.get(id) {
-            Some(obj) => obj,
+        let mut object_to_return = match self.object_map.get(id) {
+            Some(obj) => Rc::clone(obj),
             _ => return Err(PDFError {
                 message: format!("Expected {} to be an indirect object", id), function: "get_object"
             })
         };
-        Ok(Rc::clone(object_to_return))
+
+        if let Stream(ref map, ref bytes) = *object_to_return {
+            object_to_return = Rc::clone(&(self.decode_stream(map, bytes)?));
+        };
+        Ok(Rc::clone(&object_to_return))
+    }
+
+    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
+        let obj = self.get_object_once(id)?;
+        match *obj {
+            ObjectRef(nested_id) => self.get_object_once(&nested_id),
+            _ => Ok(obj)
+        }
+    }
+
+    pub fn get_from_map(&mut self, map: &HashMap<String, PDFObj>, key: &str) -> Result<Rc<PDFObj>, PDFError> {
+        match map.get(key) {
+            None => Err(PDFError{message: format!("No such key: {}", key), function: "get_from_map"}),
+            Some(ObjectRef(id)) => self.get_object(id),
+            Some(obj) => Ok(Rc::new((*obj).clone()))
+        }
+    }
+
+    fn decode_stream(&mut self, map: &HashMap<String, PDFObj>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>, PDFError> {
+        //Check size
+        let expected_byte_length = self.get_from_map(map, "Length")?
+                                       .cast_to_int()
+                                       .expect("Length key not a number!") as usize;
+        assert_eq!(bytes.len(), expected_byte_length);
+    
+        //Extract filters
+        let filters = self.get_from_map(&map, "Filter").unwrap_or(Rc::new(Array(Vec::new())));
+        let params = self.get_from_map(&map, "DecodeParms").ok();
+        let filter_string_array = match &*filters {
+            &Name(ref s) => vec!(Ok(s.clone())),
+            Array(ref v) => v.iter().map(|item| match **item {
+                PDFObj::Name(ref s) => Ok(s.clone()),
+                _ => Err(PDFError{ message: format!("Non-name item in Filter array: {:?}", item),
+                                            function: "decode_stream"})
+            }).collect(),
+            item => return Err(PDFError{ message: format!("Non-name item in Filter array: {:?}", item),
+                                        function: "decode_stream"})
+        }.into_iter().collect::<Result<Vec<String>, _>>()?;
+        let filter_array = filter_string_array
+                            .into_iter()
+                            .enumerate()
+                            // Collect matching params without throwing error if no filters need params
+                            .map(|(index, s)| decode::filter_from_string_and_params(
+                                &s, params.as_ref().map_or(
+                                            Err(PDFError{message: "No DecodeParms key".to_string(),
+                                                        function: "decode_stream" }),
+                                            |arr| match **arr {
+                                                Array(_) => arr.index(index),
+                                                _ => Ok(Rc::clone(arr))
+                                            })))
+                            .collect::<Result<Vec<decode::Filter>, _>>()?;
+        let object = filter_array.into_iter().fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
+    
+        Ok(Rc::new(DecodedStream(PDFStreamObject{})))
+    }
+
+    fn set_version(&mut self) -> Result<(), PDFError> {
+        let intro = String::from_utf8(
+                        self.bytes[..12].iter()
+                        .map(|c| *c)
+                        .take_while(|c| !is_EOL(*c))
+                        .collect());
+        let intro = match intro {
+            Ok(s) if s.contains("%PDF-") => s,
+            _ => return Err(PDFError{ message: format!("Could not find version number in {:?}", intro), function:
+                                    "set_version"})
+        };
+        self.version = match intro.splitn(2, "%PDF-")
+                            .last().unwrap()
+                            .split_at(3).0
+                            .parse::<f32>() {
+            Ok(1.0) => Some(PDFVersion::V1_0),
+            Ok(1.1) => Some(PDFVersion::V1_1),
+            Ok(1.2) => Some(PDFVersion::V1_2),
+            Ok(1.3) => Some(PDFVersion::V1_3),
+            Ok(1.4) => Some(PDFVersion::V1_4),
+            Ok(1.5) => Some(PDFVersion::V1_5),
+            Ok(1.6) => Some(PDFVersion::V1_6),
+            Ok(1.7) => Some(PDFVersion::V1_7),
+            Ok(2.0) => Some(PDFVersion::V2_0),
+            Ok(x) if x > 2.0 => return Err(PDFError{ message: format!("Unsupported PDF version: {}", x),
+                                                    function: "set_version"}),
+            _ => return Err(PDFError{ message: "Could not find PDF version".to_string(), function: "set_version"})
+        };
+        Ok(())
     }
 
     fn find_trailer_index(&self) -> Result<usize, PDFError> {
@@ -130,7 +223,7 @@ impl PdfFileHandler {
         let start_index = trailer.xref_index;
         let end_index = trailer.start_index - 1;
         let table = String::from_utf8(self.bytes[start_index..end_index].to_vec()).expect("Invalid xref table");
-        println!("{}", table);
+        //println!("{}", table);
         let mut line_iter = table.lines();
         let mut obj_number = 0;
         assert_eq!(line_iter.next().unwrap(), "xref");
@@ -480,7 +573,7 @@ impl PdfFileHandler {
                         function: "make_stream_object"})
         };
         Ok((PDFObj::Stream(stream_dict,
-                          Vec::from(&self.bytes[binary_start_index..(binary_start_index + binary_length + 1)])),
+                          Vec::from(&self.bytes[binary_start_index..(binary_start_index + binary_length)])),
             binary_start_index + binary_length + 9))
     }
     
@@ -499,7 +592,9 @@ pub enum PDFVersion {
     V2_0,
 }
 
-#[derive(Debug, PartialEq)]
+
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum PDFObj {
     Boolean(bool),
     NumberInt(i32),
@@ -513,13 +608,29 @@ pub enum PDFObj {
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
+    DecodedStream(PDFStreamObject)
 }
 
 impl PDFObj {
-    pub fn get_dict_ref(&self) -> Result<&HashMap<String, Rc<PDFObj>>, PDFError> {
+    pub fn get(&self, key: &str) -> Result<Option<&Rc<PDFObj>>, PDFError> {
         match self {
-            Dictionary(map) => Ok(&map),
+            Dictionary(map) => Ok(map.get(key)),
             _ => Err(PDFError{message: format!("No dictionary in provided type: {}", self), function: "get_dict_ref" })
+        }
+    }
+
+    pub fn index(&self, index: usize) -> Result<Rc<PDFObj>, PDFError> {
+        match self {
+            Array(vec) => Ok(Rc::clone(&vec[index])),
+            _ => Err(PDFError{message: format!("Attempted to index ({}) a non-Array object: {:?}", index, self),
+                              function: "PDFObj.index"})
+        }
+    }
+    
+    fn cast_to_int(&self) -> Result<i32, PDFError> {
+        match self {
+            NumberInt(n) => Ok(*n),
+            _ => return Err(PDFError{message: format!("Not an integer: {:?}", self), function: "cast_to_int"})
         }
     }
 }
@@ -540,21 +651,25 @@ impl fmt::Display for PDFObj {
             Comment(s) => write!(f, "Comment: {:?}", s),
             Keyword(kw) => write!(f, "Keyword: {:?}", kw),
             ObjectRef(ObjectID(id_number, gen_number)) => 
-                write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number)
-        };
+                write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number),
+            DecodedStream(PDFStreamObject) => write!(f, "Stream object")
+        }.expect("Error in write macro!");
         Ok(())
     }
 }
 
-
+//TODO: Remove pub fields
 #[derive(Debug, Hash, PartialEq, Eq, Copy, Clone)]
-pub struct ObjectID(u32, u16);
+pub struct ObjectID(pub u32, pub u16);
 
 impl fmt::Display for ObjectID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Object {} {}", self.0, self.1)
     }
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct PDFStreamObject {}
 
 #[derive(Debug, PartialEq)]
 enum PDFComplexObject {
@@ -587,11 +702,6 @@ impl fmt::Debug for PDFError {
         write!(f, "PDF Processing Error: {} in function {}", self.message, self.function)
     }
 }
-
-fn main(){
-    let pdf = PdfFileHandler::create_pdf_from_file("data/document.pdf");
-}
-
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum ParserState {
@@ -637,7 +747,7 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
             PDFObj::CharString(String::from_utf8_lossy(buffer).into_owned())
         },
         ParserState::CharString(_c) => {
-            return Err(PDFError{ message: "Asked to create string with unclosed parens".to_string(),
+            return Err(PDFError{ message: "Asked to create string with unclosed parentheses".to_string(),
                 function: "flush_buffer_to_object" });
         },
         ParserState::Name => PDFObj::Name(str::from_utf8(buffer).unwrap().to_string()),
@@ -667,7 +777,6 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
     buffer.clear();
     return Ok(new_obj)
 }
-
 
 fn make_array_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
     let mut new_vec = Vec::new();
@@ -719,58 +828,10 @@ fn make_object_from_object_buffer(mut object_buffer: Vec<PDFObj>, end_index: usi
 }
 
 
-fn peek_ahead_by_n(bytes: &Vec<u8>, index: usize, n: usize) -> Option<u8> {
-    if index + n >= bytes.len() {return None};
-    return Some(bytes[index + n])
-}
 
-fn is_octal(c: u8) -> bool {
-    b'0' <= c && c <= b'7'
-}
+// -----------Utility functions----------------
 
-fn is_whitespace(c: u8) -> bool {
-    c == 0 || c== 9 || c== 12 || c == 32 || is_EOL(c)
-}
 
-fn is_delimiter(c: u8) -> bool {
-    match c {
-        b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'/' | b'%' => true,
-        _ => false
-    }
-}
-
-fn is_hex(c: u8) -> bool {
-    (b'0' <= c && c <= b'9') || (b'A' <= c && c <= b'F')
-}
-
-fn is_EOL(c: u8) -> bool {
-    c == b'\n' || c == b'\r'
-}
-
-fn is_letter(c: u8) -> bool {
-    (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
-}
-
-fn is_body_keyword_letter(c: u8) -> bool {
-    match c {
-        b'e' | b'n' | b'd' | b's' | b't' | b'r' | b'a' | b'm' | b'o' | b'b' | b'j' | b'u' | b'l' | b'f' => true,
-        _ => false
-    }
-}
-
-fn is_trailer_keyword_letter(c: u8) -> bool {
-    match c {
-        b't' | b'r' | b'a' | b'i' | b'l' | b'e' | b's' | b'x' | b'f' => true,
-        _ => false
-    }
-}
-
-fn is_xref_table_keyword_letter(c: u8) -> bool {
-    match c {
-        b'x' | b'r' | b'e' | b'f' | b'n' | b'\n' | b'\r' => true,
-        _ => false
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -779,48 +840,11 @@ mod tests {
     const TEST_PDFS: [&str; 4] = ["data/simple_pdf.pdf", "data/CCI01212020.pdf",
                                       "data/document.pdf", "data/2018W2.pdf"];
 
-    #[test]
-    fn test_body_keyword_letters() {
-        let keywords = "stream_endstream_obj_endobj_null_true_false";
-        for letter in (b'a'..b'z').chain(b'A'..b'Z') {
-            println!("{}", letter as char);
-            if keywords.contains(letter as char) {
-                assert_eq!(is_body_keyword_letter(letter), true);
-            } else {
-                assert_eq!(is_body_keyword_letter(letter), false);
-            }
-        };
-    }
-
-    #[test]
-    fn test_trailer_keyword_letters() {
-        let keywords = "trailer_startxref";
-        for letter in (b'a'..b'z').chain(b'A'..b'Z') {
-            println!("{}", letter as char);
-            if keywords.contains(letter as char) {
-                assert_eq!(is_trailer_keyword_letter(letter), true);
-            } else {
-                assert_eq!(is_trailer_keyword_letter(letter), false);
-            }
-        };
-    }
-
-    #[test]
-    fn test_xref_table_keyword_letters() {
-        let keywords = "xref_f\r\n_n\r\n";
-        for letter in (b'a'..b'z').chain(b'A'..b'Z') {
-            println!("{}", letter as char);
-            if keywords.contains(letter as char) {
-                assert_eq!(is_xref_table_keyword_letter(letter), true);
-            } else {
-                assert_eq!(is_xref_table_keyword_letter(letter), false);
-            }
-        };
-    }
 
     #[test]
     fn test_sample_pdfs() {
         for path in &TEST_PDFS {
+            println!("{}", path);
             let mut pdf = PdfFileHandler::create_pdf_from_file(path).unwrap();
             add_all_objects(&mut pdf).unwrap();
         }
@@ -829,9 +853,10 @@ mod tests {
     fn add_all_objects(pdf: &mut PdfFileHandler) -> Result<(), PDFError> {
         let objects_to_add: Vec<(ObjectID, usize)> = pdf.index_map.iter().map(|(a, b)| (*a, *b)).collect();
         for (object_number, _index) in objects_to_add {
+            println!("Retrieving Obj #{}", object_number);
             match pdf.get_object(&object_number) {
-                Ok(obj) => {println!("Obj #{} successfully retrieved: {}", object_number, obj);},
-                Err(e) => {println!("**Obj #{} ERROR**: {:?}", object_number, e);}
+                Ok(obj) => {}//println!("Obj #{} successfully retrieved: {}", object_number, obj);},
+                Err(e) => {println!("**Obj #{} ERROR**: {:?}", object_number, e); panic!()}
             };
         };
         Ok(())

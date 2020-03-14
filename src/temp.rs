@@ -232,3 +232,76 @@ impl fmt::Display for PDFToken {
         }
     }
 }
+
+
+fn parse_ext_ascii(c: u8) -> char {
+    match c {
+        0..=127 => c as char,
+        128 => 'Ç',
+        129 => 'ü',
+        130 => 'é',
+        131 => 'â',
+        132 => 'ä',
+        133 => 'à',
+        134 => 'å',
+        135 => 'ç',
+        136 => 'ê',
+        137 => 'è',
+        138 => 'è',
+        139 => 'ï',
+        140 => 'î',
+        141 => 'ì',
+        142 => 'Ä',
+        143 => 'Å',
+        144 => 'É',
+        145 => 'æ',
+        146 => 'Æ',
+        147 => 'ô',
+        148 => 'ö',
+        149 => 'ò',
+        150 => 'û',
+        151 => 'ù',
+        152 => 'ÿ',
+        153 => 'Ö',
+        154 => 'Ü',
+        155 => '¢',
+        156 => '£',
+        157 => '¥',
+        158 => '₧',
+        159 => 'ƒ',
+        160 => 'á',
+        161 => 'í',
+        162 => 'ó',
+        163 => 'ú',
+        164 => 'ñ',
+        165 => 'Ñ',
+        166 => 'ª',
+        167 => 'º',
+        _ => '?'
+    }
+}
+
+
+fn create_node_from_object(&mut self, node_id: ObjectID) -> Result<PageNode, PDFError> {
+    let node_dict = match self.get_object(&node_id) {
+        Ok(Dictionary(map)) => map,
+        _ => return Err(PDFError{ 
+            message: "Could not find node dictionary".to_string(), function: "create_node_from_object"
+        })
+    };
+    let parent = node_dict.get("Parent");
+    let kids = node_dict.get("Kids");
+    let count = node_dict.get("Count");
+    match (parent, kids) {
+        (Some(ObjectRef(p_id)), None) => Ok(),
+        (Some(ObjectRef(p_id)), Some(kid_array)) => Ok(),
+        (None, Some(kid_array)) => Ok(),
+        (None, None) => return Err(PDFError{
+            message: format!("Page node {} must have either Parent or Kids", node_id),
+            function: "create_node_from_object"
+        })
+        
+
+        
+    }
+}
