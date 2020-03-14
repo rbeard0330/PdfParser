@@ -1,23 +1,63 @@
 mod pdf_file;
 use self::pdf_file::*;
-use std::rc;
+use std::rc::Rc;
 use pdf_file::{PDFError, ObjectID};
 
 struct PdfDoc {
     file: PdfFileHandler,
+    page_tree: Node,
+    root: SharedObject
+}
+
+type Link = Option<Vec<Box<Node>>>;
+type SharedObject = Rc<PDFObj>;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Node {
+    first_child: u32,
+    last_child: u32,
+    children: Link,
+    contents: Option<SharedObject>,
+
+}
+
+impl Node {
+    fn new() -> Node {
+        Node{
+            first_child: 0,
+            last_child: 0,
+            children: None,
+            contents: None
+        }
+    }
+
+    fn extend(&mut self, counter: u32) {
+
+    }
 }
 
 impl PdfDoc {
+    fn create_pdf_from_file(path: &str) -> Result<Self, PDFError> {
+        let mut file = PdfFileHandler::create_pdf_from_file(path)?;
+        let root = file.get_root()?;
+        let mut pdf = PdfDoc {
+            file: file,
+            page_tree: Node::new(),
+            root: root
+        };
+        Ok(pdf)
+    }
+
     fn parse_page_tree(&mut self) -> Result<(), PDFError> {
         let mut objects_to_visit = Vec::new();
-        let root = self.file.get_root()?;
-        let pages = root.get("Pages")?.expect("No pages dict!");
-        let page_ref = match **pages {
-            PDFObj::ObjectRef(id) => id,
-            _ => return Err(PDFError{message: "No reference to Pages".to_string(), function: "parse_page_tree"})
-        };
-        drop(root);
-        objects_to_visit.push(Ok(page_ref));
+        let pages = self.root.get("Pages")?.expect("No pages dict!");
+        let mut page_tree = Node::new();
+
+        let page_ref = pages.get_as_object_id()
+                            .ok_or(PDFError{message: "No reference to Pages".to_string(),
+                                        function: "parse_page_tree"})?;
+        page_tree.contents = Some(self.file.get_object(&page_ref)?);
+        let mut nodes_to_extend = vec!(&mut page_tree);
         
         loop {
             let this_obj = objects_to_visit.pop();
@@ -49,13 +89,9 @@ impl PdfDoc {
 }
 
 fn main() {
-    let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
+    let mut pdf_doc = PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
     //let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/treatise.pdf").unwrap();
-    let mut pdf_doc = PdfDoc{file: pdf_file};
     pdf_doc.parse_page_tree();
-
-
-
 }
 
 
@@ -76,7 +112,7 @@ mod tests {
     }
     
     #[test]
-    fn basic_imports() {
+    fn object_imports() {
         let test_pdfs = test_data();
         for (path, version) in test_pdfs {
             let pdf = PdfFileHandler::create_pdf_from_file(path);
@@ -93,8 +129,7 @@ mod tests {
         let test_pdfs = test_data();
         for (path, _version) in test_pdfs {
             println!("{}", path);
-            let pdf_file = PdfFileHandler::create_pdf_from_file(path).unwrap();
-            let mut pdf = PdfDoc {file: pdf_file};
+            let mut pdf = PdfDoc::create_pdf_from_file(path).unwrap();
             pdf.parse_page_tree();
         }
     }

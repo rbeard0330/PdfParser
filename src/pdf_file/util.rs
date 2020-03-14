@@ -51,6 +51,15 @@ pub fn is_xref_table_keyword_letter(c: u8) -> bool {
     }
 }
 
+/// Is c a valid character for ASCII85Decode Filter described in spec 7.4.3
+pub fn is_valid_ascii_85_byte(c: u8) -> bool {
+    match c {
+        b'z' => true,
+        _ if b'!' <= c && c <= b'u' => true,
+        _ => false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

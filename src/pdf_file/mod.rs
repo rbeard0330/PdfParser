@@ -614,7 +614,7 @@ pub enum PDFObj {
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
-    DecodedStream{ stream_type: StreamType}
+    DecodedStream{stream_type: StreamType}
 }
 
 impl PDFObj {
@@ -637,6 +637,20 @@ impl PDFObj {
         match self {
             NumberInt(n) => Ok(*n),
             _ => return Err(PDFError{message: format!("Not an integer: {:?}", self), function: "cast_to_int"})
+        }
+    }
+
+    pub fn get_as_object_id(&self) -> Option<ObjectID> {
+        match self {
+            ObjectRef(id) => Some(*id),
+            _ => None
+        }
+    }
+
+    pub fn get_dict_ref(&self) -> Option<&HashMap<String, Rc<PDFObj>>> {
+        match self {
+            Dictionary(map) => Some(map),
+            _ => None
         }
     }
 }
@@ -855,11 +869,20 @@ mod tests {
 
 
     #[test]
-    fn test_sample_pdfs() {
+    fn test_sample_pdfs_sensitive() {
         for path in &TEST_PDFS {
             println!("{}", path);
             let mut pdf = PdfFileHandler::create_pdf_from_file(path).unwrap();
             add_all_objects(&mut pdf).unwrap();
+        }
+    }
+
+        #[test]
+    fn test_sample_pdfs_stoic() {
+        for path in &TEST_PDFS {
+            println!("{}", path);
+            let mut pdf = PdfFileHandler::create_pdf_from_file(path).unwrap();
+            add_all_objects(&mut pdf);
         }
     }
 
@@ -869,7 +892,7 @@ mod tests {
             println!("Retrieving Obj #{}", object_number);
             match pdf.get_object(&object_number) {
                 Ok(obj) => {}//println!("Obj #{} successfully retrieved: {}", object_number, obj);},
-                Err(e) => {println!("**Obj #{} ERROR**: {:?}", object_number, e); panic!()}
+                Err(e) => {println!("**Obj #{} ERROR**: {:?}", object_number, e); return Err(e)}
             };
         };
         Ok(())
