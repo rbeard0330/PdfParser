@@ -105,6 +105,12 @@ impl PdfFileHandler {
                                        .cast_to_int()
                                        .expect("Length key not a number!") as usize;
         assert_eq!(bytes.len(), expected_byte_length);
+
+        let object_type = self.get_from_map(&map, "Subtype")?;
+        match &*object_type {
+            Name(ref s) if s.contains("Image") => return Ok(Rc::new(DecodedStream{stream_type: StreamType::Image})),
+            _ => {}
+        };
     
         //Extract filters
         let filters = self.get_from_map(&map, "Filter").unwrap_or(Rc::new(Array(Vec::new())));
@@ -134,7 +140,7 @@ impl PdfFileHandler {
                             .collect::<Result<Vec<decode::Filter>, _>>()?;
         let object = filter_array.into_iter().fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
     
-        Ok(Rc::new(DecodedStream(PDFStreamObject{})))
+        Ok(Rc::new(DecodedStream{stream_type: StreamType::Image}))
     }
 
     fn set_version(&mut self) -> Result<(), PDFError> {
@@ -608,7 +614,7 @@ pub enum PDFObj {
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
-    DecodedStream(PDFStreamObject)
+    DecodedStream{ stream_type: StreamType}
 }
 
 impl PDFObj {
@@ -652,7 +658,7 @@ impl fmt::Display for PDFObj {
             Keyword(kw) => write!(f, "Keyword: {:?}", kw),
             ObjectRef(ObjectID(id_number, gen_number)) => 
                 write!(f, "Reference to obj with id {} and gen {}", id_number, gen_number),
-            DecodedStream(PDFStreamObject) => write!(f, "Stream object")
+            DecodedStream{..} => write!(f, "Stream object")
         }.expect("Error in write macro!");
         Ok(())
     }
@@ -669,7 +675,14 @@ impl fmt::Display for ObjectID {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct PDFStreamObject {}
+pub struct PDFStreamObject {
+    object_type: StreamType
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum StreamType {
+    Image
+}
 
 #[derive(Debug, PartialEq)]
 enum PDFComplexObject {
