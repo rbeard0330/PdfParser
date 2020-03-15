@@ -48,8 +48,10 @@ impl PdfDoc {
         let page_ref = pages.get_as_object_id()
                             .ok_or(PDFError{message: "No reference to Pages".to_string(),
                                         function: "parse_page_tree"})?;
+        println!("Page ref: {:?}", page_ref);
         page_tree_catalog.attributes.push(self.file.get_object(&page_ref)?);
         self.expand_tree(&mut page_tree_catalog)?;
+        self.page_tree = page_tree_catalog;
         Ok(())
     }
 
@@ -62,15 +64,19 @@ impl PdfDoc {
                                                 function: "parse_page_tree::expand_tree"})?;
         println!("attributes: {:?}", node_dict_ref);
         node.contents = self.file.get_from_map(node_dict_ref, "Contents").ok();
-        println!("contests: {:?}", node.contents);
+        println!("contents: {:?}", node.contents);
         //TODO: If None, return
-        let kids = match *(self.file.get_from_map(node_dict_ref, "Kids")?) {
+        let kids_result = match self.file.get_from_map(node_dict_ref, "Kids").ok() {
+            None => return Ok(()),
+            Some(obj) => obj
+        };
+        println!("kids: {:?}", kids_result);
+        let kids = match *kids_result {
             PDFObj::Array(ref vec) => vec.clone(),
             ref obj @ _ => return Err(PDFError{message: format!("Invalid Kids dict: {}", obj), function: "expand_tree"})
         };
-        println!("kids: {:?}", kids);
         let mut child_nodes = Vec::new();
-        for kid in kids {
+        for kid in &kids {
             let mut kid_node = Node::new();
             kid_node.attributes = node.attributes.clone();
             kid_node.attributes.push(

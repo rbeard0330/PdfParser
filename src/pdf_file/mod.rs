@@ -878,10 +878,21 @@ mod tests {
 
     #[test]
     fn test_sample_pdfs_sensitive() {
+        let mut results = Vec::new();
         for path in &TEST_PDFS {
             println!("{}", path);
             let mut pdf = PdfFileHandler::create_pdf_from_file(path).unwrap();
-            add_all_objects(&mut pdf).unwrap();
+            results.push(add_all_objects(&mut pdf));
+        }
+        let results: Vec<PDFError> = results.into_iter()
+               .filter(|result| result.is_err())
+               .map(|err| err.unwrap_err())
+               .collect();
+        if results.len() > 0 {
+            for err in results {
+                println!("ERROR: {:#?}", err);
+            };
+            panic!();
         }
     }
 
