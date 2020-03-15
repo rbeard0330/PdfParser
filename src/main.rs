@@ -14,20 +14,17 @@ type SharedObject = Rc<PDFObj>;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Node {
-    first_child: u32,
-    last_child: u32,
     children: Link,
     contents: Option<SharedObject>,
-
+    attributes: Vec<SharedObject>
 }
 
 impl Node {
     fn new() -> Node {
         Node{
-            first_child: 0,
-            last_child: 0,
             children: None,
-            contents: None
+            contents: None,
+            attributes: Vec::new()
         }
     }
 
@@ -49,15 +46,29 @@ impl PdfDoc {
     }
 
     fn parse_page_tree(&mut self) -> Result<(), PDFError> {
-        let mut objects_to_visit = Vec::new();
         let pages = self.root.get("Pages")?.expect("No pages dict!");
-        let mut page_tree = Node::new();
+        let mut page_tree_catalog = Node::new();
 
         let page_ref = pages.get_as_object_id()
                             .ok_or(PDFError{message: "No reference to Pages".to_string(),
                                         function: "parse_page_tree"})?;
-        page_tree.contents = Some(self.file.get_object(&page_ref)?);
-        let mut nodes_to_extend = vec!(&mut page_tree);
+        page_tree_catalog.attributes.push(self.file.get_object(&page_ref)?);
+        self.expand_tree(&mut page_tree_catalog);
+        Ok(())
+    }
+
+    fn expand_tree(&mut self, node: &mut Node) -> Result<(), PDFError> {
+        let node_dict_ref = node.attributes
+                                .last()
+                                .unwrap()
+                                .get_dict_ref()
+                                .ok_or(PDFError{message: format!("No dict in node: {:?}", node),
+                                                function: "parse_page_tree::expand_tree"})?;
+        let kids = node_dict_ref.get("Kids")
+                                .map();
+    
+
+
         
         loop {
             let this_obj = objects_to_visit.pop();

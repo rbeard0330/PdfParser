@@ -91,15 +91,17 @@ impl PdfFileHandler {
         }
     }
 
-    pub fn get_from_map(&mut self, map: &HashMap<String, PDFObj>, key: &str) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_from_map(&mut self, map: &HashMap<String, Rc<PDFObj>>, key: &str) -> Result<Rc<PDFObj>, PDFError> {
         match map.get(key) {
             None => Err(PDFError{message: format!("No such key: {}", key), function: "get_from_map"}),
-            Some(ObjectRef(id)) => self.get_object(id),
-            Some(obj) => Ok(Rc::new((*obj).clone()))
+            Some(obj) => match **obj {
+                ObjectRef(id) => self.get_object(&id),
+                _ => Ok(Rc::clone(obj))
+            }
         }
     }
 
-    fn decode_stream(&mut self, map: &HashMap<String, PDFObj>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>, PDFError> {
+    fn decode_stream(&mut self, map: &HashMap<String, Rc<PDFObj>>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>, PDFError> {
         //Check size
         let expected_byte_length = self.get_from_map(map, "Length")?
                                        .cast_to_int()
@@ -549,7 +551,7 @@ impl PdfFileHandler {
                 function: "make_stream_object" })};
         let mut stream_dict = HashMap::new();
         for (key, value) in wrapped_stream_dict {
-            stream_dict.insert(key, Rc::try_unwrap(value).unwrap());
+            stream_dict.insert(key, value);
         }
         //println!("{:#?}", stream_dict);
         let id_number = match object_buffer[0] {
@@ -610,7 +612,7 @@ pub enum PDFObj {
     HexString(Vec<u8>),
     Array(Vec<Rc<PDFObj>>),
     Dictionary(HashMap<String, Rc<PDFObj>>),
-    Stream(HashMap<String, PDFObj>, Vec<u8>),
+    Stream(HashMap<String, Rc<PDFObj>>, Vec<u8>),
     Comment(String),
     Keyword(PDFKeyword),
     ObjectRef(ObjectID),
