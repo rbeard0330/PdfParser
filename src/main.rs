@@ -9,7 +9,7 @@ struct PdfDoc {
     root: SharedObject
 }
 
-type Link = Option<Vec<Box<Node>>>;
+type Link = Option<Vec<Node>>;
 type SharedObject = Rc<PDFObj>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +26,6 @@ impl Node {
             contents: None,
             attributes: Vec::new()
         }
-    }
-
-    fn extend(&mut self, counter: u32) {
-
     }
 }
 
@@ -53,7 +49,7 @@ impl PdfDoc {
                             .ok_or(PDFError{message: "No reference to Pages".to_string(),
                                         function: "parse_page_tree"})?;
         page_tree_catalog.attributes.push(self.file.get_object(&page_ref)?);
-        self.expand_tree(&mut page_tree_catalog);
+        self.expand_tree(&mut page_tree_catalog)?;
         Ok(())
     }
 
@@ -64,36 +60,32 @@ impl PdfDoc {
                                 .get_dict_ref()
                                 .ok_or(PDFError{message: format!("No dict in node: {:?}", node),
                                                 function: "parse_page_tree::expand_tree"})?;
-        let kids = node_dict_ref.get("Kids")
-                                .map();
-    
-
-
-        
-        loop {
-            let this_obj = objects_to_visit.pop();
-            let this_ref = match this_obj {
-                None => {break},
-                Some(id_result) => id_result?
-            };
-            let node = self.file.get_object(&this_ref)?;
-            println!("{:?}", node.get("Type"));
-            if let &PDFObj::Dictionary{..} = &*node {} else {continue};
-            let kids_array = node.get("Kids")?;
-            if kids_array.is_none() {continue}
-            match &**(kids_array.unwrap()) {
-                    &PDFObj::Array(ref v) => {
-                        objects_to_visit.extend(
-                            v.iter().map(|item| match **item {
-                                PDFObj::ObjectRef(id) => Ok(id),
-                                _ => Err(PDFError{ message: format!("Invalid item in Kids array: {:?}", item),
-                                                            function: "parse_page_tree"})
-                            }));
-                        },
-                    _ => {}
-                    
-                };
+        println!("attributes: {:?}", node_dict_ref);
+        node.contents = self.file.get_from_map(node_dict_ref, "Contents").ok();
+        println!("contests: {:?}", node.contents);
+        //TODO: If None, return
+        let kids = match *(self.file.get_from_map(node_dict_ref, "Kids")?) {
+            PDFObj::Array(ref vec) => vec.clone(),
+            ref obj @ _ => return Err(PDFError{message: format!("Invalid Kids dict: {}", obj), function: "expand_tree"})
+        };
+        println!("kids: {:?}", kids);
+        let mut child_nodes = Vec::new();
+        for kid in kids {
+            let mut kid_node = Node::new();
+            kid_node.attributes = node.attributes.clone();
+            kid_node.attributes.push(
+                self.file.get_object(
+                    &(*kid).get_as_object_id()
+                           .ok_or(PDFError{message: format!("Could not convert {:?} to object id", kid),
+                                               function: "expand_tree"})?
+                )?
+            );
+            self.expand_tree(&mut kid_node)?;
+            child_nodes.push(kid_node);
         }
+        println!("child nodes: {:?}", child_nodes);
+        node.children = Some(child_nodes);
+                        
         Ok(())
     }
 
@@ -102,7 +94,8 @@ impl PdfDoc {
 fn main() {
     let mut pdf_doc = PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
     //let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/treatise.pdf").unwrap();
-    pdf_doc.parse_page_tree();
+    pdf_doc.parse_page_tree().expect("Error");
+    println!("{:?}", pdf_doc.page_tree);
 }
 
 

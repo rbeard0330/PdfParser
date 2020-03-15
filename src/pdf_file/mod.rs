@@ -563,14 +563,20 @@ impl PdfFileHandler {
             _ => return Err(PDFError{ message: "invalid generation number".to_string(), function: "make_stream_object"})
         };
         let binary_length = match stream_dict.get("Length") {
-            Some(PDFObj::NumberInt(binary_length)) => *binary_length as usize,
-            Some(PDFObj::ObjectRef(id)) => match &*(self.get_object(id)?) {
-                &PDFObj::NumberInt(binary_length) => binary_length as usize,
-                obj @ _ => {
-                    println!("{:?}", obj);
-                    return Err(PDFError{ message: "Could not find valid /Length key by ref".to_string(),
-                            function: "make_stream_object" })
-                }
+            Some(obj) => match **obj {
+
+            
+                PDFObj::NumberInt(binary_length) => binary_length as usize,
+                PDFObj::ObjectRef(id) => match &*(self.get_object(&id)?) {
+                    &PDFObj::NumberInt(binary_length) => binary_length as usize,
+                    obj @ _ => {
+                        println!("{:?}", obj);
+                        return Err(PDFError{ message: "Could not find valid /Length key by ref".to_string(),
+                                function: "make_stream_object" })
+                    }
+                },
+                _ =>return Err(PDFError{ message: "Could not find valid /Length key".to_string(),
+                function: "make_stream_object" })
             },
             _ => return Err(PDFError{ message: "Could not find valid /Length key".to_string(),
                             function: "make_stream_object" })
