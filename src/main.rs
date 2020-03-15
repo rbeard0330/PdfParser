@@ -1,7 +1,11 @@
-mod pdf_file;
-use self::pdf_file::*;
 use std::rc::Rc;
-use pdf_file::{PDFError, ObjectID};
+use std::fmt;
+
+
+mod pdf_file;
+use pdf_file::*;
+
+type SharedObject = Rc<PDFObj>;
 
 struct PdfDoc {
     file: PdfFileHandler,
@@ -9,12 +13,11 @@ struct PdfDoc {
     root: SharedObject
 }
 
-type Link = Option<Vec<Node>>;
-type SharedObject = Rc<PDFObj>;
+// ----------Node-------------
 
 #[derive(Debug, Clone, PartialEq)]
 struct Node {
-    children: Link,
+    children: Vec<Node>,
     contents: Option<SharedObject>,
     attributes: Vec<SharedObject>
 }
@@ -22,11 +25,39 @@ struct Node {
 impl Node {
     fn new() -> Node {
         Node{
-            children: None,
+            children: Vec::new(),
             contents: None,
             attributes: Vec::new()
         }
     }
+
+    fn _display(&self, indent: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        _write_indented_line(f, format!("Contents: {:?}", self.contents), indent)?;
+        _write_indented_line(f, format!("Attributes: {:?}", self.attributes), indent)?;
+        _write_indented_line(f, format!("Children({}):", self.children.len()), indent)?;
+        for child in &self.children {
+            child._display(indent + 2, f)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f,
+            "Node\nContents: {:?}\nAttributes:{:?}\nChildren({}):",
+            self.contents, self.attributes, self.children.len())?;
+        for child in &self.children {
+            child._display(2, f)?;
+        }
+        Ok(())
+    }
+}
+
+fn _write_indented_line(f: &mut fmt::Formatter<'_>, s: String, indent: usize) -> fmt::Result {
+    let indent = String::from_utf8(vec!(b' '; indent)).unwrap();
+    write!(f, "{}{}\n", indent, s)?;
+    Ok(())
 }
 
 impl PdfDoc {
@@ -50,12 +81,12 @@ impl PdfDoc {
                                         function: "parse_page_tree"})?;
         println!("Page ref: {:?}", page_ref);
         page_tree_catalog.attributes.push(self.file.get_object(&page_ref)?);
-        self.expand_tree(&mut page_tree_catalog)?;
+        self.expand_page_tree(&mut page_tree_catalog)?;
         self.page_tree = page_tree_catalog;
         Ok(())
     }
 
-    fn expand_tree(&mut self, node: &mut Node) -> Result<(), PDFError> {
+    fn expand_page_tree(&mut self, node: &mut Node) -> Result<(), PDFError> {
         let node_dict_ref = node.attributes
                                 .last()
                                 .unwrap()
@@ -63,9 +94,8 @@ impl PdfDoc {
                                 .ok_or(PDFError{message: format!("No dict in node: {:?}", node),
                                                 function: "parse_page_tree::expand_tree"})?;
         println!("attributes: {:?}", node_dict_ref);
-        node.contents = self.file.get_from_map(node_dict_ref, "Contents").ok();
+        node.contents = self.file.get_from_map(node_dict_ref, "Contents").map_err(|e| println!("{:?}", e)).ok();
         println!("contents: {:?}", node.contents);
-        //TODO: If None, return
         let kids_result = match self.file.get_from_map(node_dict_ref, "Kids").ok() {
             None => return Ok(()),
             Some(obj) => obj
@@ -86,11 +116,11 @@ impl PdfDoc {
                                                function: "expand_tree"})?
                 )?
             );
-            self.expand_tree(&mut kid_node)?;
+            self.expand_page_tree(&mut kid_node)?;
             child_nodes.push(kid_node);
         }
-        println!("child nodes: {:?}", child_nodes);
-        node.children = Some(child_nodes);
+        //println!("child nodes: {:?}", child_nodes);
+        node.children = child_nodes;
                         
         Ok(())
     }
@@ -101,10 +131,8 @@ fn main() {
     let mut pdf_doc = PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
     //let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/treatise.pdf").unwrap();
     pdf_doc.parse_page_tree().expect("Error");
-    println!("{:?}", pdf_doc.page_tree);
+    println!("{}", pdf_doc.page_tree);
 }
-
-
 
 
 #[cfg(test)]

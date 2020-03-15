@@ -10,6 +10,9 @@ use std::rc::Rc;
 use PDFObj::*;
 use util::*;
 
+type PDFResult = Result<SharedObject, PDFError>;
+type SharedObject = Rc<PDFObj>;
+
 pub struct PdfFileHandler {
     bytes: Vec<u8>,
     pub version: Option<PDFVersion>,
@@ -86,17 +89,24 @@ impl PdfFileHandler {
     pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
         let obj = self.get_object_once(id)?;
         match *obj {
-            ObjectRef(nested_id) => self.get_object_once(&nested_id),
+            ObjectRef(nested_id) => self.get_object(&nested_id),
             _ => Ok(obj)
         }
     }
 
     pub fn get_from_map(&mut self, map: &HashMap<String, Rc<PDFObj>>, key: &str) -> Result<Rc<PDFObj>, PDFError> {
+        println!("  fetching {} from\n  {:?}", key, map);
         match map.get(key) {
-            None => Err(PDFError{message: format!("No such key: {}", key), function: "get_from_map"}),
-            Some(obj) => match **obj {
-                ObjectRef(id) => self.get_object(&id),
-                _ => Ok(Rc::clone(obj))
+            None => {
+                println!("None found!");
+                Err(PDFError{message: format!("No such key: {}", key), function: "get_from_map"})
+            },
+            Some(obj) => {
+                //println!("  found {:?}", obj);
+                    match **obj {
+                    ObjectRef(id) => self.get_object(&id),
+                    _ => Ok(Rc::clone(obj))
+                }
             }
         }
     }
@@ -108,11 +118,10 @@ impl PdfFileHandler {
                                        .expect("Length key not a number!") as usize;
         assert_eq!(bytes.len(), expected_byte_length);
 
-        let object_type = self.get_from_map(&map, "Subtype")?;
-        match &*object_type {
-            Name(ref s) if s.contains("Image") => return Ok(Rc::new(DecodedStream{stream_type: StreamType::Image})),
-            _ => {}
-        };
+        // Classify stream
+        let type_and_subtype = (self.get_from_map(&map, "Type"), self.get_from_map(&map, "Subtype"));
+        let stream_type = determine_stream_type(type_and_subtype);
+        if let StreamType::Image = stream_type { return Ok(Rc::new(DecodedStream{stream_type: StreamType::Image})) };
     
         //Extract filters
         let filters = self.get_from_map(&map, "Filter").unwrap_or(Rc::new(Array(Vec::new())));
@@ -132,12 +141,10 @@ impl PdfFileHandler {
                             .enumerate()
                             // Collect matching params without throwing error if no filters need params
                             .map(|(index, s)| decode::filter_from_string_and_params(
-                                &s, params.as_ref().map_or(
-                                            Err(PDFError{message: "No DecodeParms key".to_string(),
-                                                        function: "decode_stream" }),
+                                &s, params.as_ref().map(
                                             |arr| match **arr {
-                                                Array(_) => arr.index(index),
-                                                _ => Ok(Rc::clone(arr))
+                                                Array(_) => arr.index(index).ok(),
+                                                _ => Some(Rc::clone(arr))
                                             })))
                             .collect::<Result<Vec<decode::Filter>, _>>()?;
         let object = filter_array.into_iter().fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
@@ -593,6 +600,17 @@ impl PdfFileHandler {
     
 }
 
+fn determine_stream_type(tup: (PDFResult, PDFResult)) -> StreamType {
+    use StreamType::*;
+    if let Ok(result) = tup.1 {
+        match *result {
+            Name(ref s) if s == "Image" => return Image,
+            _ => {}
+        };
+    }
+    return Unknown
+}
+
 #[derive(Debug, PartialEq)]
 pub enum PDFVersion {
     V1_0,
@@ -703,7 +721,11 @@ pub struct PDFStreamObject {
 
 #[derive(Debug, PartialEq, Clone)]
 enum StreamType {
-    Image
+    Content,
+    Object,
+    XRef,
+    Image,
+    Unknown
 }
 
 #[derive(Debug, PartialEq)]

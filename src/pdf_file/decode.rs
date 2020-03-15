@@ -7,14 +7,14 @@ use super::*;
 pub enum Filter{
     ASCIIHex,
     ASCII85,
-    LZW(Rc<PDFObj>),
-    Flate(Rc<PDFObj>),
+    LZW(Option<SharedObject>),
+    Flate(Option<SharedObject>),
     RunLength,
-    CCITTFax(Rc<PDFObj>),
-    JBIG2(Rc<PDFObj>),
-    DCT(Rc<PDFObj>),
+    CCITTFax(Option<SharedObject>),
+    JBIG2(Option<SharedObject>),
+    DCT(Option<SharedObject>),
     JPX,
-    Crypt(Rc<PDFObj>)
+    Crypt(Option<SharedObject>)
 }
 
 impl std::fmt::Display for Filter {
@@ -115,11 +115,11 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_LZW(data: Vec<u8>, params: Rc<PDFObj>) -> Result<Vec<u8>, PDFError> {
+    fn apply_LZW(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>, PDFError> {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, params: Rc<PDFObj>) -> Result<Vec<u8>, PDFError> {
+    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>, PDFError> {
         let mut decoder = flate2::read::DeflateDecoder::new(&*data);
         let mut output = Vec::new();
         let decode_result = decoder.read_to_end(&mut output);
@@ -132,19 +132,19 @@ impl Filter {
 }
 
 
-pub fn filter_from_string_and_params(name: &str, params: Result<Rc<PDFObj>, PDFError>) -> Result<Filter, PDFError> {
+pub fn filter_from_string_and_params(name: &str, params: Option<Rc<PDFObj>>) -> Result<Filter, PDFError> {
     use Filter::*;
     match name {
         "ASCIIHexDecode" => Ok(ASCIIHex),
         "ASCII85Decode" => Ok(ASCII85),
         "JPXDecode" => Ok(JPX),
         "RunLengthDecode" => Ok(RunLength),
-        "LZWDecode" => Ok(LZW(params?)),
-        "FlateDecode" => Ok(Flate(params?)),
-        "CCITTFaxDecode" => Ok(CCITTFax(params?)),
-        "JBIG2Decode" => Ok(JBIG2(params?)),
-        "DCTDecode" => Ok(DCT(params?)),
-        "Crypt" => Ok(Crypt(params?)),
+        "LZWDecode" => Ok(LZW(params)),
+        "FlateDecode" => Ok(Flate(params)),
+        "CCITTFaxDecode" => Ok(CCITTFax(params)),
+        "JBIG2Decode" => Ok(JBIG2(params)),
+        "DCTDecode" => Ok(DCT(params)),
+        "Crypt" => Ok(Crypt(params)),
         _ => Err(PDFError{message: format!("Unsupported filter: {}", name), function: "filter_from_string"})
     }
 }
