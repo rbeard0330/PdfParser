@@ -1,5 +1,6 @@
 mod util;
 mod decode;
+mod pdf_objects;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,6 +10,7 @@ use std::rc::Rc;
 
 use PDFObj::*;
 use util::*;
+
 
 type PDFResult = Result<SharedObject, PDFError>;
 type SharedObject = Rc<PDFObj>;
@@ -143,8 +145,8 @@ impl PdfFileHandler {
                             .map(|(index, s)| decode::filter_from_string_and_params(
                                 &s, params.as_ref().map(
                                             |arr| match **arr {
-                                                Array(_) => arr.index(index).ok(),
-                                                _ => Some(Rc::clone(arr))
+                                                Array(_) => arr.index(index).unwrap(),
+                                                _ => Rc::clone(arr)
                                             })))
                             .collect::<Result<Vec<decode::Filter>, _>>()?;
         let object = filter_array.into_iter().fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
