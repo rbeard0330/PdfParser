@@ -305,3 +305,20 @@ fn create_node_from_object(&mut self, node_id: ObjectID) -> Result<PageNode, PDF
         
     }
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum PDFObj {
+    Boolean(bool),
+    NumberInt(i32),
+    NumberFloat(f32),
+    Name(String),
+    CharString(String),
+    HexString(Vec<u8>),
+    Array(Vec<SharedObject>),
+    Dictionary(HashMap<String, SharedObject>),
+    Stream(HashMap<String, SharedObject>, Vec<u8>),
+    Comment(String),
+    Keyword,
+    ObjectRef,
+    DecodedStream
+}

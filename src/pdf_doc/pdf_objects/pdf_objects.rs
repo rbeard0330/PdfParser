@@ -1,8 +1,7 @@
-use std::error;
 use std::rc::Rc;
-use std::convert::TryInto;
 use std::cell::RefCell;
 use std::fmt::Debug;
+use std::collections::HashMap;
 
 use crate::errors::*;
 
@@ -15,7 +14,7 @@ pub trait PdfObjectInterface: Debug {
         Err(ErrorKind::UnavailableType("map".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_array(&self) -> Result<Rc<PdfArray>> {
-        Err(ErrorKind::UnavailableType("arry".to_string(), format!("{:?}", &self)))?
+        Err(ErrorKind::UnavailableType("array".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_binary(&self) -> Result<Rc<Vec<u8>>> {
         Err(ErrorKind::UnavailableType("binary".to_string(), format!("{:?}", &self)))?
@@ -131,24 +130,17 @@ pub struct PdfMap {
 
 struct PdfFile {}
 
-#[derive(Debug)]
-pub struct PdfArray(Rc<Vec<SharedObject>>);
-
-impl PdfObjectInterface for PdfArray {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::Vec)
-    }
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Array)
-    }
-}
-
 pub struct Image {}
 pub struct ContentStream {}
 
 pub enum DataType {
-    Vec,
-    I32
+    VecObjects,
+    I32,
+    F32,
+    String,
+    VecU8,
+    HashMap
+
 
 }
 
@@ -160,7 +152,177 @@ pub enum PdfDataType {
     HexString,
     Array,
     Dictionary,
-    Stream
+    Stream,
+    Comment
 }
 
-struct Null {}
+#[derive(Debug, PartialEq, Clone)]
+pub struct PdfArray(Rc<PdfArray>);
+
+impl PdfObjectInterface for PdfArray {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::VecObjects)
+    }
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Array)
+    }
+    fn try_into_array(&self) -> Result<Rc<PdfArray>> {
+        Ok(Rc::clone(self.0))
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct PdfBool(bool);
+
+impl PdfObjectInterface for PdfBool {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Boolean)
+    }
+
+    fn try_into_bool(&self) -> Result<bool> {
+        Ok(self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct PdfInt(i32);
+
+impl PdfObjectInterface for PdfInt {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::I32)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Number)
+    }
+
+    fn try_into_bool(&self) -> Result<i32> {
+        Ok(self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct PdfFloat(f32);
+
+impl PdfObjectInterface for PdfFloat {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::F32)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Number)
+    }
+
+    fn try_into_float(&self) -> Result<f32> {
+        Ok(self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfName(String);
+
+impl PdfObjectInterface for PdfName {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::String)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Name)
+    }
+
+    fn try_into_string(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfComment(String);
+
+impl PdfObjectInterface for PdfComment {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::String)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Comment)
+    }
+
+    fn try_into_string(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfCharString(String);
+
+impl PdfObjectInterface for PdfCharString {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::String)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::CharString)
+    }
+
+    fn try_into_string(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfHexString(Vec<u8>);
+
+impl PdfObjectInterface for PdfHexString {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::VecU8)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::HexString)
+    }
+
+    fn try_into_binary(&self) -> Result<Vec<u8>> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfDictionary(Rc<PdfMap>);
+
+impl PdfObjectInterface for PdfDictionary {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::HashMap)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::Dictionary)
+    }
+
+    fn try_into_map(&self) -> Result<Rc<PdfMap>> {
+        Ok(Rc::clone(self.0))
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+struct PdfStream(Rc<PdfMap>, Vec<u8>);
+
+impl PdfObjectInterface for PdfStream {
+    fn get_data_type(&self) -> Result<DataType> {
+        Ok(DataType::VecU8)
+    }
+
+    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+        Ok(PdfDataType::HexString)
+    }
+    //TODO: figure out try_into
+}
+
+
+
+enum PdfKeyword{}
+
+

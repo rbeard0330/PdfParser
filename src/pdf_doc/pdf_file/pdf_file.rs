@@ -11,7 +11,6 @@ use std::rc::Rc;
 
 use crate::errors::*;
 
-use PDFObj::*;
 use util::*;
 use super::pdf_objects::{PdfObjectInterface, SharedObject};
 
@@ -623,65 +622,9 @@ pub enum PDFVersion {
     V2_0,
 }
 pub mod PdfTypes {
-    use super::super::::pdf_objects::{DataType, PdfDataType};
-    struct PdfBool(bool);
+    use super::super::pdf_objects::{DataType, PdfDataType};
+    use super::*;
 
-    impl PdfObjectInterface for PdfBool {
-        fn get_data_type(&self) -> Result<DataType> {
-            Ok(DataType::Boolean)
-        }
-
-        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-            Ok(PdfDataType::Boolean)
-        }
-
-        fn try_into_bool(&self) -> Result<bool> {
-            Ok(self.0)
-        }
-    }
-
-    struct PdfInt(i32);
-
-    impl PdfObjectInterface for PdfInt {
-        fn get_data_type(&self) -> Result<DataType> {
-            Ok(DataType::I32)
-        }
-
-        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-            Ok(PdfDataType::Number)
-        }
-
-        fn try_into_bool(&self) -> Result<i32> {
-            Ok(self.0)
-        }
-    }
-
-    #[derive(Debug, PartialEq, Clone)]
-    pub enum PDFObj {
-        Boolean(bool),
-        NumberInt(i32),
-        NumberFloat(f32),
-        Name(String),
-        CharString(String),
-        HexString(Vec<u8>),
-        Array(Vec<SharedObject>),
-        Dictionary(HashMap<String, SharedObject>),
-        Stream(HashMap<String, SharedObject>, Vec<u8>),
-        Comment(String),
-        Keyword(PDFKeyword),
-        ObjectRef(ObjectID),
-        DecodedStream{stream_type: StreamType}
-    }
-
-    impl PdfObjectInterface for PDFObj {
-        fn get_data_type(&self) -> Result<DataType> {
-            bail!("Not implemented")
-        }
-        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-            bail!("Not implemented")
-        }
-
-    }
 }
 impl PDFObj {
     pub fn get(&self, key: &str) -> Result<Option<&SharedObject>> {
