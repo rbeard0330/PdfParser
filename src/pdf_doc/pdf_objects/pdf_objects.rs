@@ -143,13 +143,12 @@ impl PdfObjectInterface for PdfArray {
     }
 }
 
-
-
 pub struct Image {}
 pub struct ContentStream {}
 
 pub enum DataType {
-    Vec
+    Vec,
+    I32
 
 }
 

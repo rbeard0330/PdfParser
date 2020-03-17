@@ -29,18 +29,13 @@ pub struct PdfFileHandler {
     pub version: Option<PDFVersion>,
     trailer: Option<PDFTrailer>,
     index_map: HashMap<ObjectID, usize>,
-    object_map: HashMap<ObjectID, Rc<PDFObj>>,
+    object_map: HashMap<ObjectID, SharedObject>,
 }
 
 impl PdfFileHandler {
 
     pub fn create_pdf_from_file(path: &str) -> Result<Self> {
-        let raw_pdf = fs::read(path);
-        let bytes = match raw_pdf {
-            Ok(data) => data,
-            Err(e) => return Err(PDFError{message:format!("File read error: {:?}", e),
-                            function: "create_pdf_from_file"})
-        };
+        let bytes = fs::read(path)?;
         let mut pdf = PdfFileHandler{
             bytes, version: None, trailer: None,
             index_map: HashMap::new(), object_map: HashMap::new(),
@@ -49,36 +44,33 @@ impl PdfFileHandler {
         let trailer_index = pdf.find_trailer_index()?;
         //println!("trailer starts at: {:?}", trailer_index);
         pdf.trailer = Some(pdf.process_trailer(trailer_index)?);
-        match pdf.process_xref_table() {
-            None => {},
-            Some(e) => return Err(e)
-        };
+        pdf.process_xref_table()?;
         Ok(pdf)
     }
 
-    pub fn get_root(&mut self) -> Result<Rc<PDFObj>> {
+    pub fn get_root(&mut self) -> Result<SharedObject> {
         let trailer_dict = match &self.trailer.as_ref().expect("Parse trailer first!").trailer_dict {
             Dictionary(trailer_dict) => trailer_dict,
-            _ => return Err(PDFError{ message: "Error processing trailer".to_string(), function: "build_page_tree"})
+            _ => bail!("Error processing trailer")
         };
         
         let catalog_ref = match trailer_dict.get("Root") {
             Some(val) => {
                 match **val {
                     ObjectRef(obj_ref) => obj_ref,
-                    _ => return Err(PDFError{ message: "/Root entry not ref".to_string(), function: "build_page_tree"})
+                    _ => bail!("/Root entry not ref")
                 }
             },
-            _ => return Err(PDFError{ message: "No /Root entry in trailer".to_string(), function: "build_page_tree"})
+            _ => bail!("No /Root entry in trailer")
         };
         drop(trailer_dict);
         self.get_object(&catalog_ref)
     }
 
-    pub fn get_object_once(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_object_once(&mut self, id: &ObjectID) -> Result<SharedObject> {
         if !self.object_map.contains_key(id) {
             let index = match self.index_map.get(id) {
-                None => return Err(PDFError{ message: format!("object {} not found", id), function: "get_object"}),
+                None => bail!(format!("object {} not found", id)),
                 Some(i) => i
             };
             let (new_obj, _) = self.parse_object(*index)?;
@@ -86,9 +78,7 @@ impl PdfFileHandler {
         };
         let mut object_to_return = match self.object_map.get(id) {
             Some(obj) => Rc::clone(obj),
-            _ => return Err(PDFError {
-                message: format!("Expected {} to be an indirect object", id), function: "get_object"
-            })
+            _ => bail!(format!("Expected {} to be an indirect object", id))
         };
 
         if let Stream(ref map, ref bytes) = *object_to_return {
@@ -97,7 +87,7 @@ impl PdfFileHandler {
         Ok(Rc::clone(&object_to_return))
     }
 
-    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>> {
+    pub fn get_object(&mut self, id: &ObjectID) -> Result<SharedObject> {
         let obj = self.get_object_once(id)?;
         match *obj {
             ObjectRef(nested_id) => self.get_object(&nested_id),
@@ -105,12 +95,12 @@ impl PdfFileHandler {
         }
     }
 
-    pub fn get_from_map(&mut self, map: &HashMap<String, Rc<PDFObj>>, key: &str) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_from_map(&mut self, map: &HashMap<String, SharedObject>, key: &str) -> Result<SharedObject> {
         println!("  fetching {} from\n  {:?}", key, map);
         match map.get(key) {
             None => {
                 println!("None found!");
-                Err(PDFError{message: format!("No such key: {}", key), function: "get_from_map"})
+                bail!(format!("No such key: {}", key));
             },
             Some(obj) => {
                 //println!("  found {:?}", obj);
@@ -122,11 +112,9 @@ impl PdfFileHandler {
         }
     }
 
-    fn decode_stream(&mut self, map: &HashMap<String, Rc<PDFObj>>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>> {
+    fn decode_stream(&mut self, map: &HashMap<String, SharedObject>, bytes: &Vec<u8>) -> Result<SharedObject> {
         //Check size
-        let expected_byte_length = self.get_from_map(map, "Length")?
-                                       .cast_to_int()
-                                       .expect("Length key not a number!") as usize;
+        let expected_byte_length = self.get_from_map(map, "Length")?.try_into_int()? as usize;
         assert_eq!(bytes.len(), expected_byte_length);
 
         // Classify stream
@@ -244,7 +232,7 @@ impl PdfFileHandler {
         return Ok(PDFTrailer {start_index, trailer_dict, xref_index})
     }
 
-    fn process_xref_table(&mut self) -> Option<PDFError> {
+    fn process_xref_table(&mut self) -> Result<()> {
         let trailer = self.trailer.as_ref().expect("Parse trailer before parsing xref table!");
         let start_index = trailer.xref_index;
         let end_index = trailer.start_index - 1;
@@ -634,35 +622,76 @@ pub enum PDFVersion {
     V1_7,
     V2_0,
 }
+pub mod PdfTypes {
+    use super::super::::pdf_objects::{DataType, PdfDataType};
+    struct PdfBool(bool);
 
+    impl PdfObjectInterface for PdfBool {
+        fn get_data_type(&self) -> Result<DataType> {
+            Ok(DataType::Boolean)
+        }
 
+        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+            Ok(PdfDataType::Boolean)
+        }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum PDFObj {
-    Boolean(bool),
-    NumberInt(i32),
-    NumberFloat(f32),
-    Name(String),
-    CharString(String),
-    HexString(Vec<u8>),
-    Array(Vec<Rc<PDFObj>>),
-    Dictionary(HashMap<String, Rc<PDFObj>>),
-    Stream(HashMap<String, Rc<PDFObj>>, Vec<u8>),
-    Comment(String),
-    Keyword(PDFKeyword),
-    ObjectRef(ObjectID),
-    DecodedStream{stream_type: StreamType}
+        fn try_into_bool(&self) -> Result<bool> {
+            Ok(self.0)
+        }
+    }
+
+    struct PdfInt(i32);
+
+    impl PdfObjectInterface for PdfInt {
+        fn get_data_type(&self) -> Result<DataType> {
+            Ok(DataType::I32)
+        }
+
+        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+            Ok(PdfDataType::Number)
+        }
+
+        fn try_into_bool(&self) -> Result<i32> {
+            Ok(self.0)
+        }
+    }
+
+    #[derive(Debug, PartialEq, Clone)]
+    pub enum PDFObj {
+        Boolean(bool),
+        NumberInt(i32),
+        NumberFloat(f32),
+        Name(String),
+        CharString(String),
+        HexString(Vec<u8>),
+        Array(Vec<SharedObject>),
+        Dictionary(HashMap<String, SharedObject>),
+        Stream(HashMap<String, SharedObject>, Vec<u8>),
+        Comment(String),
+        Keyword(PDFKeyword),
+        ObjectRef(ObjectID),
+        DecodedStream{stream_type: StreamType}
+    }
+
+    impl PdfObjectInterface for PDFObj {
+        fn get_data_type(&self) -> Result<DataType> {
+            bail!("Not implemented")
+        }
+        fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
+            bail!("Not implemented")
+        }
+
+    }
 }
-
 impl PDFObj {
-    pub fn get(&self, key: &str) -> Result<Option<&Rc<PDFObj>>> {
+    pub fn get(&self, key: &str) -> Result<Option<&SharedObject>> {
         match self {
             Dictionary(map) => Ok(map.get(key)),
             _ => Err(PDFError{message: format!("No dictionary in provided type: {}", self), function: "get_dict_ref" })
         }
     }
 
-    pub fn index(&self, index: usize) -> Result<Rc<PDFObj>> {
+    pub fn index(&self, index: usize) -> Result<SharedObject> {
         match self {
             Array(vec) => Ok(Rc::clone(&vec[index])),
             _ => Err(PDFError{message: format!("Attempted to index ({}) a non-Array object: {:?}", index, self),
@@ -684,7 +713,7 @@ impl PDFObj {
         }
     }
 
-    pub fn get_dict_ref(&self) -> Option<&HashMap<String, Rc<PDFObj>>> {
+    pub fn get_dict_ref(&self) -> Option<&HashMap<String, SharedObject>> {
         match self {
             Dictionary(map) => Some(map),
             _ => None
