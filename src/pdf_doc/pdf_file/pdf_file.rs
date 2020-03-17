@@ -1,6 +1,6 @@
 mod util;
 mod decode;
-mod pdf_objects;
+
 
 use std::collections::HashMap;
 use std::fmt;
@@ -8,12 +8,21 @@ use std::fs;
 use std::str;
 use std::rc::Rc;
 
+
+use crate::errors::*;
+
 use PDFObj::*;
 use util::*;
+use super::pdf_objects::{PdfObjectInterface, SharedObject};
 
 
-type PDFResult = Result<SharedObject, PDFError>;
-type SharedObject = Rc<PDFObj>;
+type PDFResult = Result<SharedObject>;
+
+
+pub trait PdfFileInterface<T: PdfObjectInterface> {
+    fn retrieve_object_ref(&self, id: u32, gen: u32) -> &T;
+    fn retrieve_root(&self) -> &T;
+}
 
 pub struct PdfFileHandler {
     bytes: Vec<u8>,
@@ -25,7 +34,7 @@ pub struct PdfFileHandler {
 
 impl PdfFileHandler {
 
-    pub fn create_pdf_from_file(path: &str) -> Result<Self, PDFError> {
+    pub fn create_pdf_from_file(path: &str) -> Result<Self> {
         let raw_pdf = fs::read(path);
         let bytes = match raw_pdf {
             Ok(data) => data,
@@ -47,7 +56,7 @@ impl PdfFileHandler {
         Ok(pdf)
     }
 
-    pub fn get_root(&mut self) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_root(&mut self) -> Result<Rc<PDFObj>> {
         let trailer_dict = match &self.trailer.as_ref().expect("Parse trailer first!").trailer_dict {
             Dictionary(trailer_dict) => trailer_dict,
             _ => return Err(PDFError{ message: "Error processing trailer".to_string(), function: "build_page_tree"})
@@ -88,7 +97,7 @@ impl PdfFileHandler {
         Ok(Rc::clone(&object_to_return))
     }
 
-    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn get_object(&mut self, id: &ObjectID) -> Result<Rc<PDFObj>> {
         let obj = self.get_object_once(id)?;
         match *obj {
             ObjectRef(nested_id) => self.get_object(&nested_id),
@@ -113,7 +122,7 @@ impl PdfFileHandler {
         }
     }
 
-    fn decode_stream(&mut self, map: &HashMap<String, Rc<PDFObj>>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>, PDFError> {
+    fn decode_stream(&mut self, map: &HashMap<String, Rc<PDFObj>>, bytes: &Vec<u8>) -> Result<Rc<PDFObj>> {
         //Check size
         let expected_byte_length = self.get_from_map(map, "Length")?
                                        .cast_to_int()
@@ -212,7 +221,7 @@ impl PdfFileHandler {
         Result::Ok(current_index)
     }
 
-    fn process_trailer(&mut self, start_index: usize) -> Result<PDFTrailer, PDFError> {
+    fn process_trailer(&mut self, start_index: usize) -> Result<PDFTrailer> {
         assert_eq!(&(String::from_utf8(Vec::from(&self.bytes[start_index..start_index + 7])).unwrap()), "trailer");
         let (trailer_dict, next_index) = self.parse_object(start_index + 7)?;
         let trailer_string = String::from_utf8(self.bytes[(next_index + 1)..].to_vec())
@@ -270,7 +279,7 @@ impl PdfFileHandler {
         };
     }
     
-    fn parse_object(&mut self, start_index: usize) -> Result<(PDFObj, usize), PDFError> {
+    fn parse_object(&mut self, start_index: usize) -> Result<(PDFObj, usize)> {
         let mut state = ParserState::Neutral;
         let mut index = start_index;
         let mut this_object_type = PDFComplexObject::Unknown;
@@ -646,14 +655,14 @@ pub enum PDFObj {
 }
 
 impl PDFObj {
-    pub fn get(&self, key: &str) -> Result<Option<&Rc<PDFObj>>, PDFError> {
+    pub fn get(&self, key: &str) -> Result<Option<&Rc<PDFObj>>> {
         match self {
             Dictionary(map) => Ok(map.get(key)),
             _ => Err(PDFError{message: format!("No dictionary in provided type: {}", self), function: "get_dict_ref" })
         }
     }
 
-    pub fn index(&self, index: usize) -> Result<Rc<PDFObj>, PDFError> {
+    pub fn index(&self, index: usize) -> Result<Rc<PDFObj>> {
         match self {
             Array(vec) => Ok(Rc::clone(&vec[index])),
             _ => Err(PDFError{message: format!("Attempted to index ({}) a non-Array object: {:?}", index, self),
@@ -661,7 +670,7 @@ impl PDFObj {
         }
     }
     
-    fn cast_to_int(&self) -> Result<i32, PDFError> {
+    fn cast_to_int(&self) -> Result<i32> {
         match self {
             NumberInt(n) => Ok(*n),
             _ => return Err(PDFError{message: format!("Not an integer: {:?}", self), function: "cast_to_int"})
@@ -790,7 +799,7 @@ pub enum PDFKeyword {
     StartXRef
 }
 
-fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result<PDFObj, PDFError> {
+fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result<PDFObj> {
     let new_obj = match state {
         ParserState::Neutral => return Err(PDFError {message: "Called flush buffer in Neutral context".to_string(),
                 function: "flush_buffer_to_object"}),
@@ -837,7 +846,7 @@ fn flush_buffer_to_object (state: &ParserState , buffer: &mut Vec<u8>) -> Result
     return Ok(new_obj)
 }
 
-fn make_array_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
+fn make_array_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize)> {
     let mut new_vec = Vec::new();
     for obj in object_buffer {
         new_vec.push(Rc::new(obj));
@@ -845,7 +854,7 @@ fn make_array_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -
     Ok((PDFObj::Array(new_vec), end_index))
 }
 
-fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize), PDFError> {
+fn make_dict_from_object_buffer(object_buffer: Vec<PDFObj>, end_index: usize) -> Result<(PDFObj, usize)> {
     let mut dict = HashMap::new();
     let mut object_it = object_buffer.into_iter();
     loop {

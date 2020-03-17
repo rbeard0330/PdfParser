@@ -3,6 +3,7 @@ use std::io::Read;
 use flate2;
 
 use super::*;
+use crate::errors::*;
 
 pub enum Filter{
     ASCIIHex,
@@ -37,7 +38,7 @@ impl std::fmt::Display for Filter {
 }
 
 impl Filter {
-    pub fn apply(self, data: Result<Vec<u8>, PDFError>) -> Result<Vec<u8>, PDFError> {
+    pub fn apply(self, data: Result<Vec<u8>>) -> Result<Vec<u8>> {
         use Filter::*;
         if data.is_err() {return Err(data.unwrap_err())};
         let data = data.unwrap();
@@ -46,20 +47,20 @@ impl Filter {
             ASCII85 => Filter::apply_ascii_85(data),
             LZW(params) => Filter::apply_LZW(data, params),
             Flate(params) => Filter::apply_flate(data, params),
-            _ => Err(PDFError{message: format!("Unsupported filter: {}", self), function: "Filter.apply"})
+            _ => Err(ErrorKind::FilterError(format!("Unsupported filter: {}", self), "Filter.apply"))?
         };
         output_data
     }
 
-    fn apply_ascii_hex(data: Vec<u8>) -> Result<Vec<u8>, PDFError> {
+    fn apply_ascii_hex(data: Vec<u8>) -> Result<Vec<u8>> {
         const END_OF_DATA: u8 = b'<';  // Standard 7.4.2
         let mut output = Vec::new();
         let mut buffer = Option::None;
         for c in data {
             if !is_hex(c) {
-                if !is_whitespace(c) {return Err(PDFError{
-                    message: format!("Invalid character for ASCIIHexDecode: {}", c as char),
-                    function: "Filter.apply_ascii_hex"})
+                if !is_whitespace(c) {return Err(ErrorKind::FilterError(
+                    format!("Invalid character for ASCIIHexDecode: {}", c as char),
+                    "Filter.apply_ascii_hex"))?
                 };
                 if c == END_OF_DATA { break };
             };
@@ -79,7 +80,7 @@ impl Filter {
         Ok(output)
     }
 
-    fn apply_ascii_85(data: Vec<u8>) -> Result<Vec<u8>, PDFError> {
+    fn apply_ascii_85(data: Vec<u8>) -> Result<Vec<u8>> {
         let mut new_data = Vec::new();
         for group in AsciiData(data).ascii85_iter() {
             new_data.extend(Filter::_parse_ascii_85_group(group)?)
@@ -87,19 +88,19 @@ impl Filter {
         Ok(new_data)
     }
 
-    fn _parse_ascii_85_group(arr: [Option<u8>; 5]) -> Result<Vec<u8>, PDFError> {
+    fn _parse_ascii_85_group(arr: [Option<u8>; 5]) -> Result<Vec<u8>> {
 
         let mut base_256_value: u32 = 0;
         let vec: Vec<u8> = arr.into_iter().filter(|c| c.is_some()).map(|c| c.unwrap()).collect();
         for &c in &vec {
             if !is_valid_ascii_85_byte(c) {
-                return Err(PDFError{message: format!("Invalid Ascii85 character: {}", c),
-                                    function: "apply_ascii_85"})
+                return Err(ErrorKind::FilterError(format!("Invalid Ascii85 character: {}", c),
+                                    "apply_ascii_85"))?
             };
             if c == b'z' {
                 if vec.len() > 1 {
-                    return Err(PDFError{message: format!("z in middle of group: {:?}", vec),
-                                function: "apply_ascii_85::_parse_ascii_85_group"})
+                    return Err(ErrorKind::FilterError(format!("z in middle of group: {:?}", vec),
+                                "apply_ascii_85::_parse_ascii_85_group"))?
                 }
                 return Ok(vec!(0, 0, 0, 0))
                 }
@@ -115,24 +116,24 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_LZW(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>, PDFError> {
+    fn apply_LZW(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>, PDFError> {
+    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
         let mut decoder = flate2::read::DeflateDecoder::new(&*data);
         let mut output = Vec::new();
         let decode_result = decoder.read_to_end(&mut output);
         match decode_result {
             Ok(_) => Ok(data),
-            Err(e) => Err(PDFError{message: format!("Error applying flate filter: {:?}", e),
-                                   function: "apply:apply_flate"})
+            Err(e) => Err(ErrorKind::FilterError(format!("Error applying flate filter: {:?}", e),
+                                   "apply:apply_flate"))?
         }
     }
 }
 
 
-pub fn filter_from_string_and_params(name: &str, params: Option<Rc<PDFObj>>) -> Result<Filter, PDFError> {
+pub fn filter_from_string_and_params(name: &str, params: Option<SharedObject>) -> Result<Filter> {
     use Filter::*;
     match name {
         "ASCIIHexDecode" => Ok(ASCIIHex),
@@ -145,7 +146,7 @@ pub fn filter_from_string_and_params(name: &str, params: Option<Rc<PDFObj>>) -> 
         "JBIG2Decode" => Ok(JBIG2(params)),
         "DCTDecode" => Ok(DCT(params)),
         "Crypt" => Ok(Crypt(params)),
-        _ => Err(PDFError{message: format!("Unsupported filter: {}", name), function: "filter_from_string"})
+        _ => Err(ErrorKind::FilterError(format!("Unsupported filter: {}", name), "filter_from_string"))?
     }
 }
 

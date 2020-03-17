@@ -2,119 +2,120 @@ use std::error;
 use std::rc::Rc;
 use std::convert::TryInto;
 use std::cell::RefCell;
+use std::fmt::Debug;
 
-pub type Result<T> = std::result::Result<T, PdfTypeError>;
-pub type SharedObject = Rc<dyn PdfData>;
-pub struct PdfFileError;
-pub struct PdfTypeError;
+use crate::errors::*;
 
-pub trait PdfData {
+pub type SharedObject = Rc<dyn PdfObjectInterface>;
+
+pub trait PdfObjectInterface: Debug {
     fn get_data_type(&self) -> Result<DataType>;
     fn get_pdf_primitive_type(&self) -> Result<PdfDataType>;
     fn try_into_map(&self) -> Result<Rc<PdfMap>> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("map".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_array(&self) -> Result<Rc<PdfArray>> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("arry".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_binary(&self) -> Result<Rc<Vec<u8>>> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("binary".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_string(&self) -> Result<Rc<String>> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("string".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_int(&self) -> Result<i32> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("int".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_float(&self) -> Result<f32> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("float".to_string(), format!("{:?}", &self)))?
     }
     fn try_into_bool(&self) -> Result<bool> {
-        Err(PdfTypeError)
+        Err(ErrorKind::UnavailableType("bool".to_string(), format!("{:?}", &self)))?
     }
 }
 
-trait PdfObjectReference: PdfData {
+trait PdfObjectReference: PdfObjectInterface + Debug {
     fn retrieve(self) -> Result<SharedObject>;
     fn as_ref(&self) -> Result<&SharedObject>;
 }
 
-enum LazyObject {
+#[derive(Debug)]
+pub enum PdfObject {
     Reference(Box<dyn PdfObjectReference>),
     Actual(SharedObject)
 }
 
-impl PdfData for LazyObject {
+impl PdfObjectInterface for PdfObject {
     fn get_data_type(&self) -> Result<DataType> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().get_data_type()
             },
-            LazyObject::Actual(ref obj) => obj.get_data_type()
+            PdfObject::Actual(ref obj) => obj.get_data_type()
         }
     }
     fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().get_pdf_primitive_type()
             },
-            LazyObject::Actual(ref obj) => obj.get_pdf_primitive_type()
+            PdfObject::Actual(ref obj) => obj.get_pdf_primitive_type()
         }
     }
     fn try_into_map(&self) -> Result<Rc<PdfMap>> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_map()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_map()
+            PdfObject::Actual(ref obj) => obj.try_into_map()
         }
     }
     fn try_into_array(&self) -> Result<Rc<PdfArray>> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_array()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_array()
+            PdfObject::Actual(ref obj) => obj.try_into_array()
         }
     }
     fn try_into_binary(&self) -> Result<Rc<Vec<u8>>> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_binary()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_binary()
+            PdfObject::Actual(ref obj) => obj.try_into_binary()
         }
     }
     fn try_into_string(&self) -> Result<Rc<String>> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_string()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_string()
+            PdfObject::Actual(ref obj) => obj.try_into_string()
         }
     }
     fn try_into_int(&self) -> Result<i32> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_int()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_int()
+            PdfObject::Actual(ref obj) => obj.try_into_int()
         }
     }
     fn try_into_float(&self) -> Result<f32> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_float()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_float()
+            PdfObject::Actual(ref obj) => obj.try_into_float()
         }
     }
     fn try_into_bool(&self) -> Result<bool> {
         match self {
-            LazyObject::Reference(ref link) => {
+            PdfObject::Reference(ref link) => {
                 link.as_ref().try_into_bool()
             },
-            LazyObject::Actual(ref obj) => obj.try_into_bool()
+            PdfObject::Actual(ref obj) => obj.try_into_bool()
         }
     }
 }
@@ -130,9 +131,10 @@ pub struct PdfMap {
 
 struct PdfFile {}
 
+#[derive(Debug)]
 pub struct PdfArray(Rc<Vec<SharedObject>>);
 
-impl PdfData for PdfArray {
+impl PdfObjectInterface for PdfArray {
     fn get_data_type(&self) -> Result<DataType> {
         Ok(DataType::Vec)
     }
