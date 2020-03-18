@@ -22,6 +22,10 @@ mod errors {
                 description("Error applying/decoding filter")
                 display("{} encountered an error applying/decoding filter {}", function, description)
             }
+            ParsingError(problem: String) {
+                description("Error parsing PDF file")
+                display("{}", problem)
+            }
             FileError
             ReferenceError
         }

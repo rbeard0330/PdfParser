@@ -6,8 +6,8 @@ mod pdf_objects;
 use std::rc::Rc;
 use std::fmt;
 
-use pdf_file::{PdfFileHandler};
-use pdf_objects::{SharedObject, PdfObject};
+use pdf_file::{PdfFileHandler, PdfFileInterface};
+use pdf_objects::{PdfObject, PdfDataType, PdfData};
 use crate::errors::*;
 
 struct PdfDoc {

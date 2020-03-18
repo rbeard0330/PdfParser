@@ -133,7 +133,45 @@ impl Filter {
 }
 
 
-pub fn filter_from_string_and_params(name: &str, params: Option<SharedObject>) -> Result<Filter> {
+pub fn decode_stream(map: &PdfMap, bytes: &Vec<u8>) -> Result<PdfObject> {
+    //Check size
+    let expected_byte_length = map.get("Length")?.try_into_int()? as usize;
+    assert_eq!(bytes.len(), expected_byte_length);
+
+    // Classify stream
+    let type_and_subtype = (map.get("Type"), map.get("Subtype"));
+    let stream_type = determine_stream_type(type_and_subtype);
+    if let StreamType::Image = stream_type { return Ok(Rc::new(DecodedStream{stream_type: StreamType::Image})) };
+
+    //Extract filters
+    let filters = map.get("Filter").unwrap_or(Rc::new(Array(Vec::new())));
+    let params = map.get("DecodeParms").ok();
+    let filter_string_array = match &*filters {
+        &Name(ref s) => vec!(Ok(s.clone())),
+        Array(ref v) => v.iter().map(|item| match **item {
+            PDFObj::Name(ref s) => Ok(s.clone()),
+            _ => Err(PDFError{ message: format!("Non-name item in Filter array: {:?}", item),
+                                        function: "decode_stream"})
+        }).collect(),
+        item => Err(ErrorKind::FilterError(format!("Non-name item in Filter array: {:?}", item),"decode stream"))?
+    }.into_iter().collect::<Result<Vec<String>, _>>()?;
+    let filter_array = filter_string_array
+                        .into_iter()
+                        .enumerate()
+                        // Collect matching params without throwing error if no filters need params
+                        .map(|(index, s)| filter_from_string_and_params(
+                            &s, params.as_ref().map(
+                                        |arr| match **arr {
+                                            Array(_) => arr.index(index).unwrap(),
+                                            _ => Rc::clone(arr)
+                                        })))
+                        .collect::<Result<Vec<decode::Filter>, _>>()?;
+    let object = filter_array.into_iter().fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
+
+    Ok(Rc::new(DecodedStream{stream_type: StreamType::Image}))
+}
+
+fn filter_from_string_and_params(name: &str, params: Option<PdfObject>) -> Result<Filter> {
     use Filter::*;
     match name {
         "ASCIIHexDecode" => Ok(ASCIIHex),
