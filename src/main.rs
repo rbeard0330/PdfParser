@@ -2,7 +2,6 @@
 #[path = "pdf_doc/pdf_doc.rs"]
 mod pdf_doc;
 
-
 #[macro_use]
 extern crate error_chain;
 

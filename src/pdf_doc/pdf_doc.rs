@@ -3,19 +3,18 @@ mod pdf_file;
 #[path = "pdf_objects/pdf_objects.rs"]
 mod pdf_objects;
 
-use std::rc::Rc;
 use std::fmt;
+use std::rc::Rc;
 
-use pdf_file::{PdfFileHandler, PdfFileInterface};
-use pdf_objects::{PdfObject, PdfDataType, PdfData};
 use crate::errors::*;
+pub use pdf_file::*;
+use pdf_objects::*;
 
 struct PdfDoc {
     file: PdfFileHandler,
     page_tree: Node,
-    root: SharedObject
+    root: SharedObject,
 }
-
 
 // ----------Node-------------
 
@@ -23,15 +22,15 @@ struct PdfDoc {
 struct Node {
     children: Vec<Node>,
     contents: Option<SharedObject>,
-    attributes: Vec<SharedObject>
+    attributes: Vec<SharedObject>,
 }
 
 impl Node {
     fn new() -> Node {
-        Node{
+        Node {
             children: Vec::new(),
             contents: None,
-            attributes: Vec::new()
+            attributes: Vec::new(),
         }
     }
 
@@ -48,9 +47,13 @@ impl Node {
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<()> {
-        write!(f,
+        write!(
+            f,
             "Node\nContents: {:?}\nAttributes:{:?}\nChildren({}):",
-            self.contents, self.attributes, self.children.len())?;
+            self.contents,
+            self.attributes,
+            self.children.len()
+        )?;
         for child in &self.children {
             child._display(2, f)?;
         }
@@ -59,7 +62,7 @@ impl fmt::Display for Node {
 }
 
 fn _write_indented_line(f: &mut fmt::Formatter<'_>, s: String, indent: usize) -> fmt::Result {
-    let indent = String::from_utf8(vec!(b' '; indent)).unwrap();
+    let indent = String::from_utf8(vec![b' '; indent]).unwrap();
     write!(f, "{}{}\n", indent, s)?;
     Ok(())
 }
@@ -71,64 +74,60 @@ impl PdfDoc {
         let mut pdf = PdfDoc {
             file: file,
             page_tree: Node::new(),
-            root: root
+            root: root,
         };
         Ok(pdf)
     }
 
     fn parse_page_tree(&mut self) -> Result<()> {
-        let pages = self.root.get("Pages")?.expect("No pages dict!");
+        let pages = self.root.get("Pages")?;
         let mut page_tree_catalog = Node::new();
-
-        let page_ref = pages.get_as_object_id()
-                            .ok_or(PDFError{message: "No reference to Pages".to_string(),
-                                        function: "parse_page_tree"})?;
-        println!("Page ref: {:?}", page_ref);
-        page_tree_catalog.attributes.push(self.file.get_object(&page_ref)?);
+        println!("Page ref: {:?}", pages);
+        page_tree_catalog
+            .attributes
+            .push(pages);
         self.expand_page_tree(&mut page_tree_catalog)?;
         self.page_tree = page_tree_catalog;
         Ok(())
     }
 
-    fn expand_page_tree(&mut self, node: &mut Node) -> Result<(), PDFError> {
-        let node_dict_ref = node.attributes
-                                .last()
-                                .unwrap()
-                                .get_dict_ref()
-                                .ok_or(PDFError{message: format!("No dict in node: {:?}", node),
-                                                function: "parse_page_tree::expand_tree"})?;
+    fn expand_page_tree(&mut self, node: &mut Node) -> Result<()> {
+        let node_dict_ref =
+            node.attributes
+                .last()
+                .unwrap()
+                .try_into_map()
+                .chain_err(|| ErrorKind::ParsingError(format!(
+                    "No dict in node: {:?}",
+                    node
+                )))?;
         println!("attributes: {:?}", node_dict_ref);
-        node.contents = self.file.get_from_map(node_dict_ref, "Contents").map_err(|e| println!("{:?}", e)).ok();
+        node_dict_ref.get("Contents");
         println!("contents: {:?}", node.contents);
-        let kids_result = match self.file.get_from_map(node_dict_ref, "Kids").ok() {
+        let kids_result = match node_dict_ref.get("Kids") {
             None => return Ok(()),
-            Some(obj) => obj
+            Some(obj) => obj,
         };
         println!("kids: {:?}", kids_result);
-        let kids = match *kids_result {
-            PDFObj::Array(ref vec) => vec.clone(),
-            ref obj @ _ => return Err(PDFError{message: format!("Invalid Kids dict: {}", obj), function: "expand_tree"})
-        };
+        let kids = kids_result
+            .try_into_array()
+            .chain_err(|| ErrorKind::ParsingError(format!(
+                "Invalid Kids dict: {}",
+                kids_result
+            )))?;
         let mut child_nodes = Vec::new();
-        for kid in &kids {
+        for kid in kids.into_iter() {
             let mut kid_node = Node::new();
             kid_node.attributes = node.attributes.clone();
-            kid_node.attributes.push(
-                self.file.get_object(
-                    &(*kid).get_as_object_id()
-                           .ok_or(PDFError{message: format!("Could not convert {:?} to object id", kid),
-                                               function: "expand_tree"})?
-                )?
-            );
+            kid_node.attributes.push(Rc::clone(kid));
             self.expand_page_tree(&mut kid_node)?;
             child_nodes.push(kid_node);
         }
         //println!("child nodes: {:?}", child_nodes);
         node.children = child_nodes;
-                        
+
         Ok(())
     }
-
 }
 
 fn main() {
@@ -138,13 +137,12 @@ fn main() {
     println!("{}", pdf_doc.page_tree);
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn test_data () -> HashMap<&'static str, PDFVersion> {
+    fn test_data() -> HashMap<&'static str, PDFVersion> {
         let mut data = HashMap::new();
         data.insert("data/simple_pdf.pdf", PDFVersion::V1_7);
         data.insert("data/CCI01212020.pdf", PDFVersion::V1_3);
@@ -152,7 +150,7 @@ mod tests {
         data.insert("data/2018W2.pdf", PDFVersion::V1_4);
         data
     }
-    
+
     #[test]
     fn object_imports() {
         let test_pdfs = test_data();
@@ -160,7 +158,10 @@ mod tests {
             let pdf = PdfFileHandler::create_pdf_from_file(path);
             let pdf = match pdf {
                 Ok(val) => val,
-                Err(e) => {println!("{:?}", e); panic!();}
+                Err(e) => {
+                    println!("{:?}", e);
+                    panic!();
+                }
             };
             assert_eq!(pdf.version, Some(version));
         }

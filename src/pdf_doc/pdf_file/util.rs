@@ -1,6 +1,8 @@
 pub fn peek_ahead_by_n(bytes: &Vec<u8>, index: usize, n: usize) -> Option<u8> {
-    if index + n >= bytes.len() {return None};
-    return Some(bytes[index + n])
+    if index + n >= bytes.len() {
+        return None;
+    };
+    return Some(bytes[index + n]);
 }
 
 pub fn is_octal(c: u8) -> bool {
@@ -8,13 +10,13 @@ pub fn is_octal(c: u8) -> bool {
 }
 
 pub fn is_whitespace(c: u8) -> bool {
-    c == 0 || c== 9 || c== 12 || c == 32 || is_EOL(c)
+    c == 0 || c == 9 || c == 12 || c == 32 || is_EOL(c)
 }
 
 pub fn is_delimiter(c: u8) -> bool {
     match c {
         b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'/' | b'%' => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -32,22 +34,23 @@ pub fn is_letter(c: u8) -> bool {
 
 pub fn is_body_keyword_letter(c: u8) -> bool {
     match c {
-        b'e' | b'n' | b'd' | b's' | b't' | b'r' | b'a' | b'm' | b'o' | b'b' | b'j' | b'u' | b'l' | b'f' => true,
-        _ => false
+        b'e' | b'n' | b'd' | b's' | b't' | b'r' | b'a' | b'm' | b'o' | b'b' | b'j' | b'u'
+        | b'l' | b'f' => true,
+        _ => false,
     }
 }
 
 pub fn is_trailer_keyword_letter(c: u8) -> bool {
     match c {
         b't' | b'r' | b'a' | b'i' | b'l' | b'e' | b's' | b'x' | b'f' => true,
-        _ => false
+        _ => false,
     }
 }
 
 pub fn is_xref_table_keyword_letter(c: u8) -> bool {
     match c {
         b'x' | b'r' | b'e' | b'f' | b'n' | b'\n' | b'\r' => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -56,7 +59,7 @@ pub fn is_valid_ascii_85_byte(c: u8) -> bool {
     match c {
         b'z' => true,
         _ if b'!' <= c && c <= b'u' => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -74,7 +77,7 @@ mod tests {
             } else {
                 assert_eq!(is_body_keyword_letter(letter), false);
             }
-        };
+        }
     }
 
     #[test]
@@ -87,7 +90,7 @@ mod tests {
             } else {
                 assert_eq!(is_trailer_keyword_letter(letter), false);
             }
-        };
+        }
     }
 
     #[test]
@@ -100,6 +103,6 @@ mod tests {
             } else {
                 assert_eq!(is_xref_table_keyword_letter(letter), false);
             }
-        };
+        }
     }
 }
