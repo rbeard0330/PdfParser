@@ -11,6 +11,8 @@ mod errors {
         foreign_links {
             Fmt(::std::fmt::Error);
             Io(::std::io::Error);
+            ParseFloat(::std::num::ParseFloatError);
+            ParseInt(::std::num::ParseIntError);
         }
         errors {
             UnavailableType(req: String, thrower: String) {
@@ -25,8 +27,10 @@ mod errors {
                 description("Error parsing PDF file")
                 display("{}", problem)
             }
-            FileError
-            ReferenceError
+            ReferenceError(problem: String) {
+                description("Bad reference")
+                display("{}", problem)
+            }
         }
     }
 }

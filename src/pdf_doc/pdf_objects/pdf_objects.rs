@@ -6,14 +6,20 @@ use std::rc::{Rc, Weak};
 
 use super::*;
 use crate::errors::*;
+use crate::pdf_doc::pdf_file::decode::*;
 
 pub use PdfData::*;
 
 pub type SharedObject = Rc<PdfObject>;
+pub type PdfMap = HashMap<String, Rc<PdfObject>>;
+
+pub type PdfArray = Vec<Rc<PdfObject>>;
 
 pub trait PdfObjectInterface: Debug {
     fn get_data_type(&self) -> Result<DataType>;
     fn get_pdf_primitive_type(&self) -> Result<PdfDataType>;
+    fn try_to_get<T: AsRef<str> + ?Sized>(&self, key: &T) -> Result<Option<SharedObject>>;
+    fn try_to_index(&self, index: usize)  -> Result<SharedObject>;
     fn try_into_map(&self) -> Result<Rc<PdfMap>> {
         Err(ErrorKind::UnavailableType(
             "map".to_string(),
@@ -56,9 +62,9 @@ pub trait PdfObjectInterface: Debug {
             format!("{:?}", &self),
         ))?
     }
-    fn try_into_stream(&self) -> Result<Rc<PdfStream>> {
+    fn try_into_content_stream(&self) -> Result<Rc<PdfContentStream>> {
         Err(ErrorKind::UnavailableType(
-            "stream".to_string(),
+            "content stream".to_string(),
             format!("{:?}", &self),
         ))?
     }
@@ -86,9 +92,15 @@ pub trait PdfObjectInterface: Debug {
     fn is_stream(&self) -> bool {
         false
     }
+    fn is_name(&self) -> bool {
+        false
+    }
+    fn is_number(&self) -> bool {
+        false
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PdfData {
     Boolean(bool),
     NumberInt(i32),
@@ -98,7 +110,8 @@ pub enum PdfData {
     HexString(Rc<Vec<u8>>),
     Array(Rc<PdfArray>),
     Dictionary(Rc<PdfMap>),
-    Stream(Rc<PdfStream>),
+    ContentStream(Rc<PdfContentStream>),
+    BinaryStream(Rc<PdfBinaryStream>),
     Comment(Rc<String>),
 }
 
@@ -141,13 +154,18 @@ impl PdfObject {
         PdfObject::Actual(Dictionary(data))
     }
 
-    //TODO: Stream constructor
+    pub fn new_content_stream(data: PdfContentStream) -> PdfObject {
+        PdfObject::Actual(ContentStream(Rc::new(data)))
+    }
 
+    pub fn new_binary_stream(data: PdfBinaryStream) -> PdfObject {
+        PdfObject::Actual(BinaryStream(Rc::new(data)))
+    }
     pub fn new_comment<T: Into<String>>(data: T) -> PdfObject {
         PdfObject::Actual(Comment(Rc::new(data.into())))
     }
 
-    pub fn new_reference<T, S, D>(id: T, gen: S, data: Weak<ObjectCache>) -> PdfObject
+    pub fn new_reference<T, S>(id: T, gen: S, data: Weak<ObjectCache>) -> PdfObject
     where
         T: Into<u32>,
         S: Into<u32>,
@@ -159,87 +177,278 @@ impl PdfObject {
 impl PdfObjectInterface for PdfObject {
     fn get_data_type(&self) -> Result<DataType> {
         match self {
-            PdfObject::Reference(ref link) => link.get().get_data_type(),
-            PdfObject::Actual(ref obj) => obj.get_data_type(),
+            PdfObject::Reference(ref link) => link.get()?.get_data_type(),
+            PdfObject::Actual(ref obj) => match obj {
+                Boolean(_) => Ok(DataType::Boolean),
+                NumberInt(_) => Ok(DataType::I32),
+                NumberFloat(_) => Ok(DataType::F32),
+                Name(_) => Ok(DataType::String),
+                CharString(_) => Ok(DataType::String),
+                HexString(_) => Ok(DataType::VecU8),
+                Array(_) => Ok(DataType::VecObjects),
+                Dictionary(_) => Ok(DataType::HashMap),
+                ContentStream(_) => Ok(DataType::String),
+                BinaryStream(_) => Ok(DataType::VecU8),
+                Comment(_) => Ok(DataType::String)
+            }
         }
     }
     fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
         match self {
-            PdfObject::Reference(ref link) => link.get().get_pdf_primitive_type(),
-            PdfObject::Actual(ref obj) => obj.get_pdf_primitive_type(),
+            PdfObject::Reference(ref link) => link.get()?.get_pdf_primitive_type(),
+            PdfObject::Actual(ref obj) => match obj {
+                Boolean(_) => Ok(PdfDataType::Boolean),
+                NumberInt(_) => Ok(PdfDataType::Number),
+                NumberFloat(_) => Ok(PdfDataType::Number),
+                Name(_) => Ok(PdfDataType::Name),
+                CharString(_) => Ok(PdfDataType::CharString),
+                HexString(_) => Ok(PdfDataType::HexString),
+                Array(_) => Ok(PdfDataType::Array),
+                Dictionary(_) => Ok(PdfDataType::Dictionary),
+                ContentStream(_) => Ok(PdfDataType::Stream),
+                BinaryStream(_) => Ok(PdfDataType::Stream),
+                Comment(_) => Ok(PdfDataType::Comment)
+            }
+        }
+    }
+    fn try_to_get<T: AsRef<str> + ?Sized>(&self, key: &T) -> Result<Option<SharedObject>> {
+        match self {
+            PdfObject::Reference(ref link) => link.get()?.try_to_get(key),
+            PdfObject::Actual(ref obj) => match obj {
+                Dictionary(map) => Ok(map.get(key.as_ref()).map(|result| Rc::clone(result))),
+                _ => Err(ErrorKind::UnavailableType("map".to_string(), "try_to_get".to_string()))?
+
+            }
+        }
+    }
+    fn try_to_index(&self, index: usize) -> Result<SharedObject> {
+        match self {
+            PdfObject::Reference(ref link) => link.get()?.try_to_index(index),
+            PdfObject::Actual(ref obj) => match obj {
+                Array(vec) => Ok(Rc::clone(&vec[index])),
+                _ => Err(ErrorKind::UnavailableType("vector".to_string(), "try_to_index".to_string()))?
+
+            }
         }
     }
     fn try_into_map(&self) -> Result<Rc<PdfMap>> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_map(),
-            PdfObject::Actual(ref obj) => obj.try_into_map(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_map(),
+            PdfObject::Actual(ref obj) => match obj {
+                Dictionary(map) => Ok(Rc::clone(map)),
+                _ => Err(ErrorKind::UnavailableType("map".to_string(), "try_into_map".to_string()))?
+            }
         }
     }
     fn try_into_array(&self) -> Result<Rc<PdfArray>> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_array(),
-            PdfObject::Actual(ref obj) => obj.try_into_array(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_array(),
+            PdfObject::Actual(ref obj) => match obj {
+                Array(arr) => Ok(Rc::clone(arr)),
+                _ => Err(ErrorKind::UnavailableType("array".to_string(), "try_into_array".to_string()))?
+            }
         }
     }
     fn try_into_binary(&self) -> Result<Rc<Vec<u8>>> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_binary(),
-            PdfObject::Actual(ref obj) => obj.try_into_binary(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_binary(),
+            PdfObject::Actual(ref obj) =>  match obj {
+                HexString(vec) => Ok(Rc::clone(vec)),
+                //TODO: Add binary streams
+                _ => Err(ErrorKind::UnavailableType("binary".to_string(), "try_into_binary".to_string()))?
+            },
         }
     }
     fn try_into_string(&self) -> Result<Rc<String>> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_string(),
-            PdfObject::Actual(ref obj) => obj.try_into_string(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_string(),
+            PdfObject::Actual(obj) => match obj {
+                CharString(s) | Name(s) | Comment(s) => Ok(Rc::clone(s)),
+                _ => Err(ErrorKind::UnavailableType(
+                    "string".to_string(),
+                    format!("{:?}", &self)))?
+            }
         }
     }
     fn try_into_int(&self) -> Result<i32> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_int(),
-            PdfObject::Actual(ref obj) => obj.try_into_int(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_int(),
+            PdfObject::Actual(ref obj) =>  match obj {
+                NumberInt(int) => Ok(*int),
+                _ => Err(ErrorKind::UnavailableType("integer".to_string(), "try_into_int".to_string()))?
+            },
         }
     }
     fn try_into_float(&self) -> Result<f32> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_float(),
-            PdfObject::Actual(ref obj) => obj.try_into_float(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_float(),
+            PdfObject::Actual(ref obj) =>  match obj {
+                NumberFloat(float) => Ok(*float),
+                _ => Err(ErrorKind::UnavailableType("float".to_string(), "try_into_float".to_string()))?
+            }
         }
     }
     fn try_into_bool(&self) -> Result<bool> {
         match self {
-            PdfObject::Reference(ref link) => link.get().try_into_bool(),
-            PdfObject::Actual(ref obj) => obj.try_into_bool(),
+            PdfObject::Reference(ref link) => link.get()?.try_into_bool(),
+            PdfObject::Actual(ref obj) =>  match obj {
+                Boolean(b) => Ok(*b),
+                _ => Err(ErrorKind::UnavailableType("boolean".to_string(), "try_into_bool".to_string()))?
+            },
         }
     }
-    // TODO: Implement is_ methods
-}
-
-impl Clone for PdfObject {
-    fn clone(&self) -> PdfObject {
+    fn is_map(&self) -> bool {
         match self {
-            &PdfObject::Actual(ref obj) => PdfObject::Actual(obj.clone()),
-            &PdfObject::Reference(ref obj_ref) => match obj_ref.get() {
-                Ok(obj) => obj,
-                Err(_) => PdfObject::Reference(obj_ref),
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_map(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                Dictionary(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_array(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_array(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                Array(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_binary(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_binary(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                HexString(_) | BinaryStream(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_string(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_string(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                CharString(_) | Name(_) | Comment (_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_int(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_int(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                NumberInt(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_float(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_float(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                NumberFloat(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_bool(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_bool(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                Boolean(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_stream(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_stream(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                BinaryStream(_) | ContentStream(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_name(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_name(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                Name(_) => true,
+                _ => false
+            },
+        }
+    }
+    fn is_number(&self) -> bool {
+        match self {
+            PdfObject::Reference(ref link) => match link.get() {
+                Ok(val) => val.is_number(),
+                _ => false
+            },
+            PdfObject::Actual(ref obj) =>  match obj {
+                NumberFloat(_) | NumberInt(_) => true,
+                _ => false
             },
         }
     }
 }
 
+impl Clone for PdfObject {
+    fn clone(&self) -> PdfObject {
+        match &self {
+            &PdfObject::Actual(obj) => PdfObject::Actual(obj.clone()),
+            &PdfObject::Reference(obj_ref) => PdfObject::Reference(PdfObjectReference{
+                id: obj_ref.id, gen: obj_ref.gen, data: Weak::clone(&obj_ref.data)
+            })
+        }
+    }
+}
+
+
 impl fmt::Display for PdfObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Boolean(b) => write!(f, "Boolean: {}", b),
-            NumberInt(n) => write!(f, "Number: {}", n),
-            NumberFloat(n) => write!(f, "Number: {:.2}", n),
-            Name(s) => write!(f, "Name: {}", s),
-            CharString(s) => write!(f, "String: {}", s),
-            HexString(s) => write!(f, "String: {:?}", s),
-            Array(v) => write!(f, "Array: {:#?}", v),
-            Dictionary(h) => write!(f, "Dictionary: {:#?}", h),
-            Stream(d, _) => write!(f, "Stream object: {:#?}", d),
-            Comment(s) => write!(f, "Comment: {:?}", s),
+            PdfObject::Reference(r) => write!(f, "Reference to object #{}", r.id),
+            PdfObject::Actual(obj) => match obj {
+                Boolean(b) => write!(f, "Boolean: {}", b),
+                NumberInt(n) => write!(f, "Number: {}", n),
+                NumberFloat(n) => write!(f, "Number: {:.2}", n),
+                Name(s) => write!(f, "Name: {}", s),
+                CharString(s) => write!(f, "String: {}", s),
+                HexString(s) => write!(f, "String: {:?}", s),
+                Array(v) => write!(f, "Array: {:#?}", v),
+                Dictionary(h) => write!(f, "Dictionary: {:#?}", h),
+                ContentStream(d) => write!(f, "Content stream object: {}", d),
+                BinaryStream(d) => write!(f, "Content stream object: {}", d),
+                Comment(s) => write!(f, "Comment: {:?}", s),
             //Keyword(kw) => write!(f, "Keyword: {:?}", kw),
+            }
         }
         .expect("Error in write macro!");
         Ok(())
@@ -253,34 +462,12 @@ struct PdfObjectReference<T: PdfFileInterface<PdfObject>> {
     data: Weak<T>,
 }
 
-impl<T> PdfObjectReference<T> {
-    fn get(&self) -> Result<PdfObject> {
-        self.data.retrieve_object_ref(self.id, self.gen)
-    }
-}
-
-pub trait PdfMapInterface {
-    fn get<T: Into<String>>(&self, key: T) -> Option<SharedObject>;
-    fn insert<T: Into<String>>(&mut self, key: T, value: SharedObject) -> Option<SharedObject>;
-}
-
-#[derive(Debug, Clone)]
-pub struct PdfMap(HashMap<String, SharedObject>);
-
-impl PdfMapInterface for PdfMap {
-    fn get<T: Into<str>>(&self, key: T) -> Option<SharedObject> {
-        self.0.get(key).map(|result| Rc::clone(result))
-    }
-
-    fn insert<T: Into<str>>(&mut self, key: T, value: SharedObject) -> Option<SharedObject> {
-        self.0.insert(key, Rc::clone(value))
-    }
-}
-
-impl<'a> IntoIterator for &'a PdfMap {
-    type Item = (&'a String, SharedObject);
-    fn into_iter(&'a self) -> Iter<'_, &'a String, SharedObject> {
-        self.0.iter().map(|k, v| (k, Rc::clone(v)))
+impl<T: PdfFileInterface<PdfObject> + Debug> PdfObjectReference<T> {
+    fn get(&self) -> Result<SharedObject> {
+        println!("{:#?}", self);
+        println!("Count: {}", Weak::strong_count(&self.data));
+        let usable_ref = self.data.upgrade().expect("Could not access weak ref in File Interface get");
+        usable_ref.retrieve_object_by_ref(self.id, self.gen)
     }
 }
 
@@ -290,6 +477,7 @@ pub struct Image {}
 pub struct ContentStream {}
 
 pub enum DataType {
+    Boolean,
     VecObjects,
     I32,
     F32,
@@ -309,170 +497,3 @@ pub enum PdfDataType {
     Stream,
     Comment,
 }
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct PdfArray(Rc<PdfArray>);
-
-impl PdfObjectInterface for PdfArray {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::VecObjects)
-    }
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Array)
-    }
-    fn try_into_array(&self) -> Result<Rc<PdfArray>> {
-        Ok(Rc::clone(self.0))
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-struct PdfBool(bool);
-
-impl PdfObjectInterface for PdfBool {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Boolean)
-    }
-
-    fn try_into_bool(&self) -> Result<bool> {
-        Ok(self.0)
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-struct PdfInt(i32);
-
-impl PdfObjectInterface for PdfInt {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::I32)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Number)
-    }
-
-    fn try_into_bool(&self) -> Result<i32> {
-        Ok(self.0)
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-struct PdfFloat(f32);
-
-impl PdfObjectInterface for PdfFloat {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::F32)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Number)
-    }
-
-    fn try_into_float(&self) -> Result<f32> {
-        Ok(self.0)
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfName(String);
-
-impl PdfObjectInterface for PdfName {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::String)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Name)
-    }
-
-    fn try_into_string(&self) -> Result<String> {
-        Ok(self.0.clone())
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfComment(String);
-
-impl PdfObjectInterface for PdfComment {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::String)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Comment)
-    }
-
-    fn try_into_string(&self) -> Result<String> {
-        Ok(self.0.clone())
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfCharString(String);
-
-impl PdfObjectInterface for PdfCharString {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::String)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::CharString)
-    }
-
-    fn try_into_string(&self) -> Result<String> {
-        Ok(self.0.clone())
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfHexString(Vec<u8>);
-
-impl PdfObjectInterface for PdfHexString {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::VecU8)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::HexString)
-    }
-
-    fn try_into_binary(&self) -> Result<Vec<u8>> {
-        Ok(self.0.clone())
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfDictionary(Rc<PdfMap>);
-
-impl PdfObjectInterface for PdfDictionary {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::HashMap)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::Dictionary)
-    }
-
-    fn try_into_map(&self) -> Result<Rc<PdfMap>> {
-        Ok(Rc::clone(self.0))
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-struct PdfStream(Rc<PdfMap>, Vec<u8>);
-
-impl PdfObjectInterface for PdfStream {
-    fn get_data_type(&self) -> Result<DataType> {
-        Ok(DataType::VecU8)
-    }
-
-    fn get_pdf_primitive_type(&self) -> Result<PdfDataType> {
-        Ok(PdfDataType::HexString)
-    }
-    //TODO: figure out try_into
-}
-
-enum PdfKeyword {}

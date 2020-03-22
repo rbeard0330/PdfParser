@@ -10,6 +10,7 @@ use crate::errors::*;
 pub use pdf_file::*;
 use pdf_objects::*;
 
+#[derive(Debug)]
 struct PdfDoc {
     file: PdfFileHandler,
     page_tree: Node,
@@ -34,7 +35,7 @@ impl Node {
         }
     }
 
-    fn _display(&self, indent: usize, f: &mut fmt::Formatter<'_>) -> Result<()> {
+    fn _display(&self, indent: usize, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         _write_indented_line(f, format!("Contents: {:?}", self.contents), indent)?;
         _write_indented_line(f, format!("Attributes: {:?}", self.attributes), indent)?;
         _write_indented_line(f, format!("Children({}):", self.children.len()), indent)?;
@@ -46,7 +47,7 @@ impl Node {
 }
 
 impl fmt::Display for Node {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<()> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "Node\nContents: {:?}\nAttributes:{:?}\nChildren({}):",
@@ -70,37 +71,37 @@ fn _write_indented_line(f: &mut fmt::Formatter<'_>, s: String, indent: usize) ->
 impl PdfDoc {
     fn create_pdf_from_file(path: &str) -> Result<Self> {
         let mut file = PdfFileHandler::create_pdf_from_file(path)?;
-        let root = file.get_root()?;
+        let trailer_dict = file.retrieve_trailer()?
+                               .try_into_map()
+                               .unwrap();
+        let root = trailer_dict.get("Root").ok_or(ErrorKind::ParsingError("Root not present in trailer!".to_string()))?;
         let mut pdf = PdfDoc {
             file: file,
             page_tree: Node::new(),
-            root: root,
+            root: Rc::clone(root),
         };
         Ok(pdf)
     }
 
     fn parse_page_tree(&mut self) -> Result<()> {
-        let pages = self.root.get("Pages")?;
+        println!("cache: {:?}", Rc::strong_count(&self.file.object_map));
+        let pages = self.root.try_to_get("Pages")?;
+        if let None = pages { Err(ErrorKind::ParsingError(format!("No Pages in {:?}", self.root)))? };
         let mut page_tree_catalog = Node::new();
         println!("Page ref: {:?}", pages);
-        page_tree_catalog
-            .attributes
-            .push(pages);
+        page_tree_catalog.attributes.push(Rc::clone(&pages.unwrap()));
         self.expand_page_tree(&mut page_tree_catalog)?;
         self.page_tree = page_tree_catalog;
         Ok(())
     }
 
     fn expand_page_tree(&mut self, node: &mut Node) -> Result<()> {
-        let node_dict_ref =
-            node.attributes
-                .last()
-                .unwrap()
-                .try_into_map()
-                .chain_err(|| ErrorKind::ParsingError(format!(
-                    "No dict in node: {:?}",
-                    node
-                )))?;
+        let node_dict_ref = node
+            .attributes
+            .last()
+            .unwrap()
+            .try_into_map()
+            .chain_err(|| ErrorKind::ParsingError(format!("No dict in node: {:?}", node)))?;
         println!("attributes: {:?}", node_dict_ref);
         node_dict_ref.get("Contents");
         println!("contents: {:?}", node.contents);
@@ -111,15 +112,12 @@ impl PdfDoc {
         println!("kids: {:?}", kids_result);
         let kids = kids_result
             .try_into_array()
-            .chain_err(|| ErrorKind::ParsingError(format!(
-                "Invalid Kids dict: {}",
-                kids_result
-            )))?;
+            .chain_err(|| ErrorKind::ParsingError(format!("Invalid Kids dict: {}", kids_result)))?;
         let mut child_nodes = Vec::new();
-        for kid in kids.into_iter() {
+        for kid in kids.as_ref().into_iter() {
             let mut kid_node = Node::new();
             kid_node.attributes = node.attributes.clone();
-            kid_node.attributes.push(Rc::clone(kid));
+            kid_node.attributes.push(Rc::clone(&kid));
             self.expand_page_tree(&mut kid_node)?;
             child_nodes.push(kid_node);
         }
@@ -173,6 +171,8 @@ mod tests {
         for (path, _version) in test_pdfs {
             println!("{}", path);
             let mut pdf = PdfDoc::create_pdf_from_file(path).unwrap();
+            println!("Current strong: {}", Rc::strong_count(&pdf.file.object_map));
+            //println!("{:#?}", pdf.file.object_map);
             pdf.parse_page_tree();
         }
     }
