@@ -8,3 +8,7 @@ edition = "2018"
 
 [dependencies]
 flate2 = "*"
+error-chain = "*"
+vec-tree = "*"
+log = "*"
+pretty_env_logger = "*"
