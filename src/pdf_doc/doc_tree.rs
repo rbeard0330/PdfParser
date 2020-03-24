@@ -7,8 +7,12 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::errors::*;
+use vec_tree;
+
 pub use pdf_file::*;
 use pdf_objects::*;
+
+struct DocTree {}
 
 #[derive(Debug)]
 struct PdfDoc {
@@ -86,9 +90,10 @@ impl PdfDoc {
     fn parse_page_tree(&mut self) -> Result<()> {
         println!("cache: {:?}", Rc::strong_count(&self.file.object_map));
         let pages = self.root.try_to_get("Pages")?;
+        println!("Page ref: {:?}", pages);
         if let None = pages { Err(ErrorKind::ParsingError(format!("No Pages in {:?}", self.root)))? };
         let mut page_tree_catalog = Node::new();
-        println!("Page ref: {:?}", pages);
+
         page_tree_catalog.attributes.push(Rc::clone(&pages.unwrap()));
         self.expand_page_tree(&mut page_tree_catalog)?;
         self.page_tree = page_tree_catalog;
@@ -161,7 +166,7 @@ mod tests {
                     panic!();
                 }
             };
-            assert_eq!(pdf.version, Some(version));
+            assert_eq!(pdf.version, version);
         }
     }
 

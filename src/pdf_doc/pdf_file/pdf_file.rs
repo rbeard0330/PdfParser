@@ -24,7 +24,7 @@ pub trait PdfFileInterface<T: PdfObjectInterface> {
 #[derive(Debug)]
 pub struct ObjectCache {
     cache: RefCell<HashMap<ObjectId, Rc<PdfObject>>>,
-    index_map: HashMap<ObjectId, usize>,
+    index_map: RefCell<HashMap<ObjectId, usize>>,
     data: Vec<u8>,
     self_ref: RefCell<Weak<Self>>
 }
@@ -34,7 +34,7 @@ impl ObjectCache {
     fn new(data: Vec<u8>, index: HashMap<ObjectId, usize>, weak_ref: Weak<Self>) -> Self {
         ObjectCache{
             cache: RefCell::new(HashMap::new()),
-            index_map: HashMap::new(),
+            index_map: RefCell::new(HashMap::new()),
             data,
             self_ref: RefCell::new(weak_ref)
         }
@@ -46,18 +46,24 @@ impl ObjectCache {
 
 impl PdfFileInterface<PdfObject> for ObjectCache {
     fn retrieve_object_by_ref(&self, id: u32, gen: u32) -> Result<SharedObject> {
-        let mut map = self.cache.borrow_mut();
+        
         let key = ObjectId(id, gen);
-        if let None = map.get(&key) {
-            map.insert(key,
-                Rc::new(parse_object_at(&self.data,
-                                *self.index_map.get(&key).ok_or(
-                                    ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?,
-                                    &self.self_ref.borrow()
-                                )?.0)
-                );
-        };
-        Ok(Rc::clone(map.get(&key).unwrap()))
+        let cache_results;
+        {
+            let mut map = self.cache.borrow_mut();
+            cache_results = map.get(&key).map(|r| Rc::clone(r));
+        } // Drop mutable borrow here, before potentially recursive call to parse_object_at
+
+        if let None = cache_results {
+            let new_obj = Rc::new(parse_object_at(&self.data,
+                *self.index_map.borrow().get(&key).ok_or(
+                    ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?,
+                    &Weak::clone(&self.self_ref.borrow())
+                )?.0);
+            let mut map = self.cache.borrow_mut();
+            map.insert(key, new_obj);
+        };  // Second mutable borrow dropped here
+        Ok(Rc::clone(self.cache.borrow().get(&key).unwrap()))
 
     }
     fn retrieve_trailer(&self) -> Result<SharedObject> {
@@ -67,10 +73,9 @@ impl PdfFileInterface<PdfObject> for ObjectCache {
 
 #[derive(Debug)]
 pub struct PdfFileHandler {
-    pub version: Option<PDFVersion>,
+    pub version: PDFVersion,
     trailer: Option<PDFTrailer>,
     pub object_map: Rc<ObjectCache>,
-    weak_ref_to_clone: Weak<ObjectCache>,
 }
 
 impl PdfFileInterface<PdfObject> for PdfFileHandler {
@@ -89,30 +94,27 @@ impl PdfFileInterface<PdfObject> for PdfFileHandler {
 
 impl PdfFileHandler {
     pub fn create_pdf_from_file(path: &str) -> Result<Self> {
+        //TODO: Fix the index
         let bytes = fs::read(path)?;
+        let pdf_version = PdfFileHandler::get_version(&bytes)?;
         let null_ref = Weak::new();
-        let null_bytes = Vec::new();
-        let temp_cache_ref = Rc::new(ObjectCache::new(null_bytes, HashMap::new(), null_ref.clone()));
-        let temp_weak_ref = Rc::downgrade(&temp_cache_ref);
+        let cache_ref = Rc::new(ObjectCache::new(bytes, HashMap::new(), null_ref.clone()));
+        let weak_ref = Rc::downgrade(&cache_ref);
+        cache_ref.update_reference(Weak::clone(&weak_ref));
         let mut pdf = PdfFileHandler {
-            version: None,
+            version: pdf_version,
             trailer: None,
-            object_map: temp_cache_ref,
-            weak_ref_to_clone: temp_weak_ref,
+            object_map: cache_ref,
         };
-        pdf.set_version(&bytes)?;
-        let trailer_index = pdf.find_trailer_index(&bytes)?;
+        let trailer_index = pdf.find_trailer_index(&pdf.object_map.data)?;
         //println!("trailer starts at: {:?}", trailer_index);
-        pdf.trailer = Some(pdf.process_trailer(&bytes, trailer_index)?);
-        let index = pdf.process_xref_table(&bytes)?;
-        pdf.object_map = Rc::new(ObjectCache::new(bytes, index, null_ref));
-        pdf.weak_ref_to_clone = Rc::downgrade(&pdf.object_map);
-        pdf.object_map.update_reference(Weak::clone(&pdf.weak_ref_to_clone));
-        println!("Initial strong count: {}", Rc::strong_count(&pdf.object_map));
+        pdf.trailer = Some(pdf.process_trailer(trailer_index)?);
+        let index = pdf.process_xref_table()?;
+        *pdf.object_map.index_map.borrow_mut() = index;
         Ok(pdf)
     }
 
-    fn set_version(&mut self, bytes: &Vec<u8>) -> Result<()> {
+    fn get_version(bytes: &Vec<u8>) -> Result<PDFVersion> {
         let intro = String::from_utf8(
             bytes[..12]
                 .iter()
@@ -129,7 +131,7 @@ impl PdfFileHandler {
                 )))?
             }
         };
-        self.version = match intro
+        match intro
             .splitn(2, "%PDF-")
             .last()
             .unwrap()
@@ -137,15 +139,15 @@ impl PdfFileHandler {
             .0
             .parse::<f32>()
         {
-            Ok(1.0) => Some(PDFVersion::V1_0),
-            Ok(1.1) => Some(PDFVersion::V1_1),
-            Ok(1.2) => Some(PDFVersion::V1_2),
-            Ok(1.3) => Some(PDFVersion::V1_3),
-            Ok(1.4) => Some(PDFVersion::V1_4),
-            Ok(1.5) => Some(PDFVersion::V1_5),
-            Ok(1.6) => Some(PDFVersion::V1_6),
-            Ok(1.7) => Some(PDFVersion::V1_7),
-            Ok(2.0) => Some(PDFVersion::V2_0),
+            Ok(1.0) => Ok(PDFVersion::V1_0),
+            Ok(1.1) => Ok(PDFVersion::V1_1),
+            Ok(1.2) => Ok(PDFVersion::V1_2),
+            Ok(1.3) => Ok(PDFVersion::V1_3),
+            Ok(1.4) => Ok(PDFVersion::V1_4),
+            Ok(1.5) => Ok(PDFVersion::V1_5),
+            Ok(1.6) => Ok(PDFVersion::V1_6),
+            Ok(1.7) => Ok(PDFVersion::V1_7),
+            Ok(2.0) => Ok(PDFVersion::V2_0),
             Ok(x) if x > 2.0 => Err(ErrorKind::ParsingError(format!(
                 "Unsupported PDF version: {}",
                 x
@@ -153,8 +155,7 @@ impl PdfFileHandler {
             _ => Err(ErrorKind::ParsingError(
                 "Could not find PDF version".to_string(),
             ))?,
-        };
-        Ok(())
+        }
     }
 
     fn find_trailer_index(&self, bytes: &Vec<u8>) -> Result<usize> {
@@ -184,13 +185,15 @@ impl PdfFileHandler {
         Result::Ok(current_index)
     }
 
-    fn process_trailer(&mut self, bytes: &Vec<u8>, start_index: usize) -> Result<PDFTrailer> {
+    fn process_trailer(&mut self, start_index: usize) -> Result<PDFTrailer> {
         assert_eq!(
-            &(String::from_utf8(Vec::from(&bytes[start_index..start_index + 7])).unwrap()),
+            &(String::from_utf8(Vec::from(&self.object_map.data[start_index..start_index + 7])).unwrap()),
             "trailer"
         );
-        let (trailer_dict, next_index) = parse_object_at(&bytes, start_index + 7, &self.weak_ref_to_clone)?;
-        let trailer_string = String::from_utf8(bytes[(next_index + 1)..].to_vec())
+        let (trailer_dict, next_index) = parse_object_at(&self.object_map.data,
+                                                         start_index + 7,
+                                                         &Weak::clone(&self.object_map.self_ref.borrow()))?;
+        let trailer_string = String::from_utf8(self.object_map.data[(next_index + 1)..].to_vec())
             .expect("Could not convert trailer to string!");
         let mut trailer_lines = trailer_string.lines().filter(|l| !l.trim().is_empty());
         let first_line = trailer_lines.next().expect("No line after trailer dict!");
@@ -216,14 +219,14 @@ impl PdfFileHandler {
         });
     }
 
-    fn process_xref_table(&mut self, bytes: &Vec<u8>) -> Result<HashMap<ObjectId, usize>> {
+    fn process_xref_table(&mut self) -> Result<HashMap<ObjectId, usize>> {
         let trailer = self
             .trailer
             .as_ref()
             .expect("Parse trailer before parsing xref table!");
         let start_index = trailer.xref_index;
         let end_index = trailer.start_index - 1;
-        let table = String::from_utf8(bytes[start_index..end_index].to_vec())
+        let table = String::from_utf8(self.object_map.data[start_index..end_index].to_vec())
             .expect("Invalid xref table");
         //println!("{}", table);
         let mut map = HashMap::new();
@@ -253,7 +256,7 @@ impl PdfFileHandler {
             } else if parts.len() == 2 {
                 obj_number = parts[0].parse().expect("Could not parse object number");
             } else {
-                println!("{:?}", parts);
+                //println!("{:?}", parts);
                 return Err(ErrorKind::ParsingError(format!(
                     "Invalid line in xref table: {:?}",
                     parts
@@ -271,8 +274,9 @@ fn parse_object_at(data: &Vec<u8>, start_index: usize, weak_ref: &Weak<ObjectCac
     let length = data.len();
     if index > length {
         return Err(ErrorKind::ParsingError(format!(
-            "index {} out of range",
-            index
+            "index {} out of range (max: {})",
+            index,
+            length
         )))?;
     }
     let mut char_buffer = Vec::new();
@@ -363,7 +367,7 @@ fn parse_object_at(data: &Vec<u8>, start_index: usize, weak_ref: &Weak<ObjectCac
                             .unwrap()
                         ).map_err(|_e| ErrorKind::ParsingError("Invalid id".to_string()))?,
                         <u32>::try_from(
-                            object_buffer[object_buffer_length - 2]
+                            object_buffer[object_buffer_length - 1]
                             .try_into_int()
                             .unwrap()
                         ).map_err(|_e| ErrorKind::ParsingError("Invalid gen".to_string()))?,
@@ -566,6 +570,11 @@ fn parse_object_at(data: &Vec<u8>, start_index: usize, weak_ref: &Weak<ObjectCac
                             object_buffer.push(PdfObject::new_boolean(true));
                             index -= 1;
                             ParserState::Neutral
+                        },
+                        PDFKeyword::Null => {
+                            object_buffer.push(PdfObject::Actual(Null));
+                            index -= 1;
+                            ParserState::Neutral
                         }
                         _ => {
                             return Err(ErrorKind::ParsingError(format!(
@@ -753,8 +762,7 @@ fn flush_buffer_to_object(state: &ParserState, buffer: &mut Vec<u8>) -> Result<P
             PdfObject::new_hex_string(buffer.clone() as Vec<u8>)
         }
         ParserState::CharString(0) => {
-            PdfObject::new_char_string(str::from_utf8(buffer)
-                .chain_err(|| ErrorKind::ParsingError(format!("String contains invalid UTF-8: {:?}", buffer)))?)
+            PdfObject::new_char_string(String::from_utf8_lossy(buffer).to_owned())
         }
         ParserState::CharString(_c) => {
             Err(ErrorKind::ParsingError(format!("String contains unclosed parentheses: {:?}", buffer)))?
@@ -874,14 +882,14 @@ mod tests {
 
     fn add_all_objects(pdf: &mut PdfFileHandler) -> Result<()> {
         let objects_to_add: Vec<(ObjectId, usize)> =
-            pdf.object_map.as_ref().index_map.iter().map(|(a, b)| (*a, *b)).collect();
+            pdf.object_map.as_ref().index_map.borrow().iter().map(|(a, b)| (*a, *b)).collect();
         for (object_number, _index) in objects_to_add {
-            println!("Retrieving Obj #{}", object_number);
+            println!("Retrieving Obj #{}:", object_number);
             match pdf.retrieve_object_by_ref(object_number.0, object_number.1) {
                 Ok(obj) => {} //println!("Obj #{} successfully retrieved: {}", object_number, obj);},
                 Err(e) => {
-                    println!("**Obj #{} ERROR**: {:?}", object_number, e);
-                    return Err(e);
+                    println!("**Obj #{} ERROR**: {}", object_number, e);
+                    Err(e.chain_err(|| ErrorKind::TestingError(format!("**Obj #{} ERROR**", object_number))))?;
                 }
             };
         }

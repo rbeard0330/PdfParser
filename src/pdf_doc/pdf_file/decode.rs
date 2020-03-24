@@ -5,7 +5,7 @@ use flate2;
 
 use super::*;
 use crate::errors::*;
-use crate::pdf_doc::pdf_objects::PdfObjectInterface;
+use crate::doc_tree::pdf_objects::PdfObjectInterface;
 
 #[derive(Debug)]
 pub struct PdfContentStream {
@@ -72,6 +72,8 @@ impl Filter {
         if data.is_err() {
             return Err(data.unwrap_err());
         };
+        if let Ok(ref v) = data {println!("input data:\nstart: {:?},\nend: {:?},\nlength: {}", &v[..5], &v[(v.len() - 5)..], &v.len());
+        };
         let data = data.unwrap();
         let output_data = match self {
             ASCIIHex => Filter::apply_ascii_hex(data),
@@ -83,6 +85,7 @@ impl Filter {
                 "Filter.apply",
             ))?,
         };
+        println!("output data_success: {:?}", !output_data.is_err());
         output_data
     }
 
@@ -166,7 +169,7 @@ impl Filter {
     }
 
     fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
-        let mut decoder = flate2::read::DeflateDecoder::new(&*data);
+        let mut decoder = flate2::read::ZlibDecoder::new(&*data);
         let mut output = Vec::new();
         let decode_result = decoder.read_to_end(&mut output);
         match decode_result {
@@ -189,6 +192,7 @@ pub fn decode_stream(map: PdfMap, bytes: Vec<u8>) -> Result<PdfObject> {
         )))?
         .try_into_int()? as usize;
     assert_eq!(bytes.len(), expected_byte_length);
+    println!("expected byte length: {}, actual: {}", expected_byte_length, bytes.len());
 
     // Classify stream
     let type_and_subtype = (map.get("Type"), map.get("Subtype"));

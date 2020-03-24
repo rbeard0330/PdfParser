@@ -6,7 +6,7 @@ use std::rc::{Rc, Weak};
 
 use super::*;
 use crate::errors::*;
-use crate::pdf_doc::pdf_file::decode::*;
+use crate::doc_tree::pdf_file::decode::*;
 
 pub use PdfData::*;
 
@@ -113,6 +113,7 @@ pub enum PdfData {
     ContentStream(Rc<PdfContentStream>),
     BinaryStream(Rc<PdfBinaryStream>),
     Comment(Rc<String>),
+    Null
 }
 
 #[derive(Debug)]
@@ -189,7 +190,8 @@ impl PdfObjectInterface for PdfObject {
                 Dictionary(_) => Ok(DataType::HashMap),
                 ContentStream(_) => Ok(DataType::String),
                 BinaryStream(_) => Ok(DataType::VecU8),
-                Comment(_) => Ok(DataType::String)
+                Comment(_) => Ok(DataType::String),
+                Null => Ok(DataType::Null)
             }
         }
     }
@@ -207,7 +209,8 @@ impl PdfObjectInterface for PdfObject {
                 Dictionary(_) => Ok(PdfDataType::Dictionary),
                 ContentStream(_) => Ok(PdfDataType::Stream),
                 BinaryStream(_) => Ok(PdfDataType::Stream),
-                Comment(_) => Ok(PdfDataType::Comment)
+                Comment(_) => Ok(PdfDataType::Comment),
+                Null => Ok(PdfDataType::Null)
             }
         }
     }
@@ -447,10 +450,10 @@ impl fmt::Display for PdfObject {
                 ContentStream(d) => write!(f, "Content stream object: {}", d),
                 BinaryStream(d) => write!(f, "Content stream object: {}", d),
                 Comment(s) => write!(f, "Comment: {:?}", s),
+                Null => write!(f, "Null")
             //Keyword(kw) => write!(f, "Keyword: {:?}", kw),
             }
-        }
-        .expect("Error in write macro!");
+        }?;
         Ok(())
     }
 }
@@ -484,6 +487,7 @@ pub enum DataType {
     String,
     VecU8,
     HashMap,
+    Null
 }
 
 pub enum PdfDataType {
@@ -496,4 +500,5 @@ pub enum PdfDataType {
     Dictionary,
     Stream,
     Comment,
+    Null
 }
