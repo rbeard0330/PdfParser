@@ -3,15 +3,17 @@ mod pdf_file;
 #[path = "pdf_objects/pdf_objects.rs"]
 mod pdf_objects;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
 use crate::errors::*;
-use vec_tree;
+use vec_tree::VecTree;
 
 pub use pdf_file::*;
 use pdf_objects::*;
 
+type TreeIndex = vec_tree::Index;
 struct DocTree {}
 
 #[derive(Debug)]
@@ -25,53 +27,79 @@ struct PdfDoc {
 
 #[derive(Debug, Clone)]
 struct Node {
-    children: Vec<Node>,
+    node_type: NodeType,
     contents: Option<SharedObject>,
-    attributes: Vec<SharedObject>,
+    attributes: HashMap<String, SharedObject>,
 }
 
-impl Node {
-    fn new() -> Node {
-        Node {
-            children: Vec::new(),
-            contents: None,
-            attributes: Vec::new(),
-        }
+
+#[derive(Debug, Clone, Copy)]
+enum NodeType {
+    Root,
+    Page,
+    PageTreeIntermediate,
+    NotImplemented
+}
+
+struct PageTree {
+    tree: VecTree<Node>,
+}
+
+impl PageTree {
+    fn new(root: &PdfObject) -> Result<Self> {
+        let mut new_tree = PageTree{ tree: VecTree::new() };
+        new_tree.add_node(root, None)?;
+        Ok(new_tree)
     }
 
-    fn _display(&self, indent: usize, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        _write_indented_line(f, format!("Contents: {:?}", self.contents), indent)?;
-        _write_indented_line(f, format!("Attributes: {:?}", self.attributes), indent)?;
-        _write_indented_line(f, format!("Children({}):", self.children.len()), indent)?;
-        for child in &self.children {
-            child._display(indent + 2, f)?;
-        }
+    fn add_node(&mut self, new_node: &PdfObject, target_index: Option<TreeIndex>) -> Result<()> {
+        let node_map = new_node.try_into_map()
+                               .chain_err(|| ErrorKind::TestingError(
+                                   format!("Expected dictionary, got {:?}", new_node))
+                                )?;
+        let node_type = node_map.get("Type")
+                                .map(|obj| PageTree::_get_node_type(obj))
+                                .ok_or(ErrorKind::DocTreeError(
+                                    format!("No /Type key in node")
+                                ))??;
+        let kids = node_map.get("Kids");
+        let new_node = Node{
+            contents: node_map.get("Contents").map(|rc_ref| Rc::clone(rc_ref)),
+            node_type,
+            attributes: node_map.as_ref().clone()
+        };
+        
+        let this_index = match target_index {
+            None => self.tree.insert_root(new_node),
+            Some(index) => self.tree.insert(new_node, index)
+        };
+        let kids = match node_type {
+            NodeType::Root => node_map.get("Pages"),
+            NodeType::PageTreeIntermediate => node_map.get("Kids"),
+            _ => None
+        };
+
+                                
         Ok(())
     }
-}
 
-impl fmt::Display for Node {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Node\nContents: {:?}\nAttributes:{:?}\nChildren({}):",
-            self.contents,
-            self.attributes,
-            self.children.len()
-        )?;
-        for child in &self.children {
-            child._display(2, f)?;
+    fn _get_node_type(name: &PdfObject) -> Result<NodeType> {
+        use NodeType::*;
+        match &name.try_into_string()?[..] {
+            "Pages" => Ok(PageTreeIntermediate),
+            "Page" => Ok(Page),
+            "Catalog" => Ok(Root),
+            _ => Ok(NotImplemented)
         }
-        Ok(())
     }
 }
+
 
 fn _write_indented_line(f: &mut fmt::Formatter<'_>, s: String, indent: usize) -> fmt::Result {
     let indent = String::from_utf8(vec![b' '; indent]).unwrap();
     write!(f, "{}{}\n", indent, s)?;
     Ok(())
 }
-
 impl PdfDoc {
     fn create_pdf_from_file(path: &str) -> Result<Self> {
         let mut file = PdfFileHandler::create_pdf_from_file(path)?;
