@@ -1,5 +1,6 @@
 pub mod decode;
 mod util;
+mod file_reader;
 
 
 use std::cell::RefCell;
@@ -14,7 +15,6 @@ use crate::errors::*;
 
 pub use super::pdf_objects::*;
 use util::*;
-use decode::*;
 
 pub trait PdfFileInterface<T: PdfObjectInterface> {
     fn retrieve_object_by_ref(&self, id: u32, gen: u32) -> Result<Rc<T>>;
@@ -34,7 +34,7 @@ impl ObjectCache {
     fn new(data: Vec<u8>, index: HashMap<ObjectId, usize>, weak_ref: Weak<Self>) -> Self {
         ObjectCache{
             cache: RefCell::new(HashMap::new()),
-            index_map: RefCell::new(HashMap::new()),
+            index_map: RefCell::new(index),
             data,
             self_ref: RefCell::new(weak_ref)
         }
@@ -50,9 +50,9 @@ impl PdfFileInterface<PdfObject> for ObjectCache {
         let key = ObjectId(id, gen);
         let cache_results;
         {
-            let mut map = self.cache.borrow_mut();
+            let map = self.cache.borrow_mut();
             cache_results = map.get(&key).map(|r| Rc::clone(r));
-        } // Drop mutable borrow here, before potentially recursive call to parse_object_at
+        } // Drop borrow of cache here, before potentially recursive call to parse_object_at
 
         if let None = cache_results {
             let new_obj = Rc::new(parse_object_at(&self.data,
@@ -60,10 +60,10 @@ impl PdfFileInterface<PdfObject> for ObjectCache {
                     ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?,
                     &Weak::clone(&self.self_ref.borrow())
                 )?.0);
-            let mut map = self.cache.borrow_mut();
+            let mut map = self.cache.borrow_mut();  // Mutable borrow of map
             map.insert(key, new_obj);
-        };  // Second mutable borrow dropped here
-        Ok(Rc::clone(self.cache.borrow().get(&key).unwrap()))
+        };  // Mutable borrow of map dropped here
+        Ok(Rc::clone(self.cache.borrow().get(&key).unwrap()))  // Immutable borrow of map
 
     }
     fn retrieve_trailer(&self) -> Result<SharedObject> {
@@ -109,6 +109,7 @@ impl PdfFileHandler {
         let trailer_index = pdf.find_trailer_index(&pdf.object_map.data)?;
         //println!("trailer starts at: {:?}", trailer_index);
         pdf.trailer = Some(pdf.process_trailer(trailer_index)?);
+        //pdf.set_trailer_and_xref()?;
         let index = pdf.process_xref_table()?;
         *pdf.object_map.index_map.borrow_mut() = index;
         Ok(pdf)
@@ -131,31 +132,34 @@ impl PdfFileHandler {
                 )))?
             }
         };
-        match intro
-            .splitn(2, "%PDF-")
+        match intro // Syntax: %PDF-x.y
+            .splitn(2, "%PDF-")  // Trim leading text
             .last()
-            .unwrap()
-            .split_at(3)
+            .ok_or(ErrorKind::ParsingError(format!(
+                "Missing '%PDF-' marker")))?
+            .split_at(3)  // Trim everything after the 3 version characters
             .0
-            .parse::<f32>()
+            .split_at(1)  // Split out two two-character strings
         {
-            Ok(1.0) => Ok(PDFVersion::V1_0),
-            Ok(1.1) => Ok(PDFVersion::V1_1),
-            Ok(1.2) => Ok(PDFVersion::V1_2),
-            Ok(1.3) => Ok(PDFVersion::V1_3),
-            Ok(1.4) => Ok(PDFVersion::V1_4),
-            Ok(1.5) => Ok(PDFVersion::V1_5),
-            Ok(1.6) => Ok(PDFVersion::V1_6),
-            Ok(1.7) => Ok(PDFVersion::V1_7),
-            Ok(2.0) => Ok(PDFVersion::V2_0),
-            Ok(x) if x > 2.0 => Err(ErrorKind::ParsingError(format!(
-                "Unsupported PDF version: {}",
-                x
+            ("1", ".0") => Ok(PDFVersion::V1_0),
+            ("1", ".1") => Ok(PDFVersion::V1_1),
+            ("1", ".2") => Ok(PDFVersion::V1_2),
+            ("1", ".3") => Ok(PDFVersion::V1_3),
+            ("1", ".4") => Ok(PDFVersion::V1_4),
+            ("1", ".5") => Ok(PDFVersion::V1_5),
+            ("1", ".6") => Ok(PDFVersion::V1_6),
+            ("1", ".7") => Ok(PDFVersion::V1_7),
+            ("2", ".0") => Ok(PDFVersion::V2_0),
+            (x, y) => Err(ErrorKind::ParsingError(format!(
+                "Unsupported PDF version: {}.{}",
+                x, y
             )))?,
-            _ => Err(ErrorKind::ParsingError(
-                "Could not find PDF version".to_string(),
-            ))?,
         }
+    }
+
+    fn set_trailer_and_xref(&mut self) -> Result<()> {
+
+        Ok(())
     }
 
     fn find_trailer_index(&self, bytes: &Vec<u8>) -> Result<usize> {
@@ -282,7 +286,7 @@ fn parse_object_at(data: &Vec<u8>, start_index: usize, weak_ref: &Weak<ObjectCac
     let mut char_buffer = Vec::new();
     let mut object_buffer = Vec::new();
     loop {
-        if index > length {
+        if index >= length {
             return Err(ErrorKind::ParsingError(
                 "end of file while parsing object".to_string(),
             ))?;
@@ -643,8 +647,9 @@ fn make_stream_object(
     let binary_length = stream_dict
         .get("Length")
         .ok_or(ErrorKind::ParsingError(format!(
-            "No Length value for stream {}",
-            id_number
+            "No Length value for stream {} {}",
+            id_number,
+            gen_number
         )))?
         .try_into_int()
         .chain_err(|| ErrorKind::ParsingError("Invalid gen number".to_string()))?
@@ -652,8 +657,8 @@ fn make_stream_object(
     // TODO: Confirm endstream included
     if binary_start_index + binary_length >= data.len() {
         Err(ErrorKind::ParsingError(format!(
-            "Reported binary content length for Obj#{} ({}) too long",
-            id_number, binary_length
+            "Reported binary content length for Obj#{} {} ({}) too long",
+            id_number, gen_number, binary_length
         )))?
     };
     Ok((
@@ -876,7 +881,10 @@ mod tests {
         for path in &TEST_PDFS {
             println!("{}", path);
             let mut pdf = PdfFileHandler::create_pdf_from_file(path).unwrap();
-            add_all_objects(&mut pdf);
+            match add_all_objects(&mut pdf) {
+                Ok(_) => println!("Ok!"),
+                Err(_) => println!("Err!")
+            };
         }
     }
 
@@ -886,7 +894,7 @@ mod tests {
         for (object_number, _index) in objects_to_add {
             println!("Retrieving Obj #{}:", object_number);
             match pdf.retrieve_object_by_ref(object_number.0, object_number.1) {
-                Ok(obj) => {} //println!("Obj #{} successfully retrieved: {}", object_number, obj);},
+                Ok(obj) => { println!("Obj #{} successfully retrieved: {}", object_number, obj); },
                 Err(e) => {
                     println!("**Obj #{} ERROR**: {}", object_number, e);
                     Err(e.chain_err(|| ErrorKind::TestingError(format!("**Obj #{} ERROR**", object_number))))?;

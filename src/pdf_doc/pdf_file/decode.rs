@@ -131,11 +131,10 @@ impl Filter {
 
     fn _parse_ascii_85_group(arr: [Option<u8>; 5]) -> Result<Vec<u8>> {
         let mut base_256_value: u32 = 0;
-        let vec: Vec<u8> = arr
-            .into_iter()
-            .filter(|c| c.is_some())
-            .map(|c| c.unwrap())
-            .collect();
+        let vec: Vec<u8> = arr.iter()
+                              .filter(|c| c.is_some())
+                              .map(|c| c.unwrap())
+                              .collect();
         for &c in &vec {
             if !is_valid_ascii_85_byte(c) {
                 return Err(ErrorKind::FilterError(
@@ -164,11 +163,11 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_LZW(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
+    fn apply_LZW(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
+    fn apply_flate(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
         let mut decoder = flate2::read::ZlibDecoder::new(&*data);
         let mut output = Vec::new();
         let decode_result = decoder.read_to_end(&mut output);
@@ -342,7 +341,7 @@ mod tests {
 
     #[test]
     fn flate_example() {
-        let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
+        let _pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
         //TODO: Example
     }
 }

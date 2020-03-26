@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::Into;
 use std::fmt::Debug;
@@ -467,8 +466,6 @@ struct PdfObjectReference<T: PdfFileInterface<PdfObject>> {
 
 impl<T: PdfFileInterface<PdfObject> + Debug> PdfObjectReference<T> {
     fn get(&self) -> Result<SharedObject> {
-        println!("{:#?}", self);
-        println!("Count: {}", Weak::strong_count(&self.data));
         let usable_ref = self.data.upgrade().expect("Could not access weak ref in File Interface get");
         usable_ref.retrieve_object_by_ref(self.id, self.gen)
     }

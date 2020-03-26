@@ -17,9 +17,9 @@ type TreeIndex = vec_tree::Index;
 struct DocTree {}
 
 #[derive(Debug)]
-struct PdfDoc {
+pub struct PdfDoc {
     file: PdfFileHandler,
-    page_tree: Node,
+    page_tree: PageTree,
     root: SharedObject,
 }
 
@@ -41,6 +41,21 @@ enum NodeType {
     NotImplemented
 }
 
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let display_contents = match self.contents {
+            None => "with no contents".to_string(),
+            Some(_) => "with contents".to_string()
+        };
+        writeln!(f, "Node of type {:?} {} and these attributes:", self.node_type, display_contents)?;
+        for key in self.attributes.keys() {
+            writeln!(f, "  {:?}", key)?
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct PageTree {
     tree: VecTree<Node>,
 }
@@ -53,6 +68,7 @@ impl PageTree {
     }
 
     fn add_node(&mut self, new_node: &PdfObject, target_index: Option<TreeIndex>) -> Result<()> {
+        println!("Adding {:?} to tree", new_node);
         let node_map = new_node.try_into_map()
                                .chain_err(|| ErrorKind::TestingError(
                                    format!("Expected dictionary, got {:?}", new_node))
@@ -73,14 +89,28 @@ impl PageTree {
             None => self.tree.insert_root(new_node),
             Some(index) => self.tree.insert(new_node, index)
         };
-        let kids = match node_type {
-            NodeType::Root => node_map.get("Pages"),
-            NodeType::PageTreeIntermediate => node_map.get("Kids"),
-            _ => None
-        };
-
-                                
-        Ok(())
+        // Verify required entries for node type
+        match node_type {
+            NodeType::Root => {
+                let page_parent = node_map.get("Pages")
+                        .ok_or(ErrorKind::DocTreeError(format!("Root node missing /Pages entry")))?;
+                self.add_node(page_parent, Some(this_index))
+            },
+            NodeType::PageTreeIntermediate => {
+                let kids_array = node_map.get("Kids")
+                                     .ok_or(ErrorKind::DocTreeError(format!("Page tree node missing /Kids entry")))?;
+                for kid in kids_array.try_into_array()
+                                .chain_err(||
+                                    ErrorKind::DocTreeError(
+                                        format!("Could not resolve /Kids object into array: {:?}", kids)
+                                    ))?
+                                .as_ref() {
+                    self.add_node(kid.as_ref(), Some(this_index))?;
+                };
+                Ok(())
+            },
+            _ => Ok(())
+        }
     }
 
     fn _get_node_type(name: &PdfObject) -> Result<NodeType> {
@@ -100,72 +130,38 @@ fn _write_indented_line(f: &mut fmt::Formatter<'_>, s: String, indent: usize) ->
     write!(f, "{}{}\n", indent, s)?;
     Ok(())
 }
-impl PdfDoc {
-    fn create_pdf_from_file(path: &str) -> Result<Self> {
-        let mut file = PdfFileHandler::create_pdf_from_file(path)?;
-        let trailer_dict = file.retrieve_trailer()?
-                               .try_into_map()
-                               .unwrap();
-        let root = trailer_dict.get("Root").ok_or(ErrorKind::ParsingError("Root not present in trailer!".to_string()))?;
-        let mut pdf = PdfDoc {
-            file: file,
-            page_tree: Node::new(),
-            root: Rc::clone(root),
+
+impl fmt::Display for PageTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let root = self.tree.get_root_index().unwrap();
+        for node in self.tree.descendants(root) {
+            writeln!(f, "{}", self.tree.get(node).unwrap())?
         };
-        Ok(pdf)
-    }
-
-    fn parse_page_tree(&mut self) -> Result<()> {
-        println!("cache: {:?}", Rc::strong_count(&self.file.object_map));
-        let pages = self.root.try_to_get("Pages")?;
-        println!("Page ref: {:?}", pages);
-        if let None = pages { Err(ErrorKind::ParsingError(format!("No Pages in {:?}", self.root)))? };
-        let mut page_tree_catalog = Node::new();
-
-        page_tree_catalog.attributes.push(Rc::clone(&pages.unwrap()));
-        self.expand_page_tree(&mut page_tree_catalog)?;
-        self.page_tree = page_tree_catalog;
-        Ok(())
-    }
-
-    fn expand_page_tree(&mut self, node: &mut Node) -> Result<()> {
-        let node_dict_ref = node
-            .attributes
-            .last()
-            .unwrap()
-            .try_into_map()
-            .chain_err(|| ErrorKind::ParsingError(format!("No dict in node: {:?}", node)))?;
-        println!("attributes: {:?}", node_dict_ref);
-        node_dict_ref.get("Contents");
-        println!("contents: {:?}", node.contents);
-        let kids_result = match node_dict_ref.get("Kids") {
-            None => return Ok(()),
-            Some(obj) => obj,
-        };
-        println!("kids: {:?}", kids_result);
-        let kids = kids_result
-            .try_into_array()
-            .chain_err(|| ErrorKind::ParsingError(format!("Invalid Kids dict: {}", kids_result)))?;
-        let mut child_nodes = Vec::new();
-        for kid in kids.as_ref().into_iter() {
-            let mut kid_node = Node::new();
-            kid_node.attributes = node.attributes.clone();
-            kid_node.attributes.push(Rc::clone(&kid));
-            self.expand_page_tree(&mut kid_node)?;
-            child_nodes.push(kid_node);
-        }
-        //println!("child nodes: {:?}", child_nodes);
-        node.children = child_nodes;
-
         Ok(())
     }
 }
 
-fn main() {
-    let mut pdf_doc = PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
-    //let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/treatise.pdf").unwrap();
-    pdf_doc.parse_page_tree().expect("Error");
-    println!("{}", pdf_doc.page_tree);
+impl PdfDoc {
+    pub fn create_pdf_from_file(path: &str) -> Result<Self> {
+        let file = PdfFileHandler::create_pdf_from_file(path)?;
+        let trailer_dict = file.retrieve_trailer()?
+                               .try_into_map()
+                               .unwrap();
+        let root = trailer_dict.get("Root").ok_or(ErrorKind::ParsingError("Root not present in trailer!".to_string()))?;
+        let pdf = PdfDoc {
+            file: file,
+            page_tree: PageTree::new(&root)?,
+            root: Rc::clone(root),
+        };
+        Ok(pdf)
+    }
+}
+
+impl fmt::Display for PdfDoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.page_tree)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -203,10 +199,7 @@ mod tests {
         let test_pdfs = test_data();
         for (path, _version) in test_pdfs {
             println!("{}", path);
-            let mut pdf = PdfDoc::create_pdf_from_file(path).unwrap();
-            println!("Current strong: {}", Rc::strong_count(&pdf.file.object_map));
-            //println!("{:#?}", pdf.file.object_map);
-            pdf.parse_page_tree();
+            PdfDoc::create_pdf_from_file(path).unwrap();
         }
     }
 }

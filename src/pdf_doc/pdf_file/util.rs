@@ -28,9 +28,9 @@ pub fn is_EOL(c: u8) -> bool {
     c == b'\n' || c == b'\r'
 }
 
-pub fn is_letter(c: u8) -> bool {
-    (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
-}
+// pub fn is_letter(c: u8) -> bool {
+//     (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
+// }
 
 pub fn is_body_keyword_letter(c: u8) -> bool {
     match c {
