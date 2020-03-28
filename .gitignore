@@ -3,3 +3,8 @@
 /rust_ws.code-workspace
 .vscode/tasks.json
 .vscode/settings.json
+.vscode/launch.json
+data/2018W2.pdf
+data/document.pdf
+data/treatise.pdf
+.gitignore

@@ -120,7 +120,7 @@ impl PdfFileHandler {
             bytes[..12]
                 .iter()
                 .map(|c| *c)
-                .take_while(|c| !is_EOL(*c))
+                .take_while(|c| !is_eol(*c))
                 .collect(),
         );
         let intro = match intro {
@@ -514,7 +514,7 @@ fn parse_object_at(data: &Vec<u8>, start_index: usize, weak_ref: &Weak<ObjectCac
                 }
             },
             ParserState::Comment => {
-                if is_EOL(c) {
+                if is_eol(c) {
                     object_buffer.push(flush_buffer_to_object(&state, &mut char_buffer)?);
                     ParserState::Neutral
                 } else {

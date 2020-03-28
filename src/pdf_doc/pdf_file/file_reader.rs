@@ -1,7 +1,7 @@
-use std::io::{Cursor, BufRead, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::collections::HashSet;
-use std::cmp;
 use std::convert::TryInto;
+use std::ops::{Index, Range, RangeTo, RangeFrom, RangeFull};
 
 use crate::errors::*;
 
@@ -12,7 +12,7 @@ const PDF_DELIMITERS: [u8; 17] = [
 
 
 
-struct PdfFileReader {
+pub struct PdfFileReader {
     data: Vec<u8>,
     cursor: usize,
     delimiters: HashSet<u8>,
@@ -20,7 +20,7 @@ struct PdfFileReader {
 }
 
 
-pub trait PdfFileReaderInterface: Sized {
+pub trait PdfFileReaderInterface: Index<Range<usize>> + Sized {
     /// Return a new reader over the provided file. The reader will read the entire file into memory.
     fn new(path: &str) -> Result<Self>;
 
@@ -72,6 +72,47 @@ impl Seek for PdfFileReader {
 
 }
 
+impl Index<usize> for PdfFileReader {
+    type Output = u8;
+
+    fn index(&self, ix: usize) -> &Self::Output {
+        &self.data[ix]
+    }
+}
+
+impl Index<Range<usize>> for PdfFileReader {
+    type Output = [u8];
+
+    fn index(&self, ix: Range<usize>) -> &Self::Output {
+        &self.data[ix]
+    }
+}
+
+impl Index<RangeTo<usize>> for PdfFileReader {
+    type Output = [u8];
+
+    fn index(&self, ix: RangeTo<usize>) -> &Self::Output {
+        &self.data[ix]
+    }
+}
+
+impl Index<RangeFrom<usize>> for PdfFileReader {
+    type Output = [u8];
+
+    fn index(&self, ix: RangeFrom<usize>) -> &Self::Output {
+        &self.data[ix]
+    }
+}
+
+impl Index<RangeFull> for PdfFileReader {
+    type Output = [u8];
+
+    fn index(&self, ix: RangeFull) -> &Self::Output {
+        &self.data[ix]
+    }
+}
+
+
 impl PdfFileReaderInterface for PdfFileReader {
     fn new(path: &str) -> Result<Self> {
         Ok(PdfFileReader{
@@ -83,69 +124,67 @@ impl PdfFileReaderInterface for PdfFileReader {
     }
     fn get_n(&mut self, n: usize) -> &[u8] {
         let old_cursor = self.cursor;
-        if old_cursor >= self.data.len() { return &[] };
+        if old_cursor >= self.len() { return &[] };
         self.cursor = self.bound_n((self.cursor + n) as i64);
         println!("get_n: {} Slice from: {} to {}", n, old_cursor, self.cursor);
-        &self.data[(old_cursor) .. (self.cursor)]
+        &self[(old_cursor) .. (self.cursor)]
     }
     fn peek_ahead_n(&self, n: usize) -> &[u8] {
-        if self.cursor >= self.data.len() { return &[] };
+        if self.cursor >= self.len() { return &[] };
         let end_index = self.bound_n((self.cursor + n) as i64);
         println!("peek_ahead_n: {} Slice from: {} to {}", n, self.cursor, end_index);
-        &self.data[self.cursor..end_index]
+        &self[self.cursor..end_index]
     }
     fn peek_behind_n(&self, n: usize) -> &[u8] {
         if self.cursor <= 0 { return &[] };
         let start_index = self.bound_n(self.cursor as i64 - n as i64);
         println!("peek_behind_n: {} Slice from: {} to {}", n, start_index, self.cursor);
-        &self.data[start_index..self.cursor]
+        &self[start_index..self.cursor]
     }
     fn get_until_delimiter(&mut self) -> &[u8] {
         let start_index = self.cursor;
-        let last_index = self.data.len();
-        while self.cursor < last_index {
-            if self.delimiters.contains(&self.data[self.cursor]) { break };
+        while self.cursor < self.len() {
+            if self.is_on_delimiter() { break };
             self.cursor += 1;
         }
-        &self.data[start_index..self.cursor]
+        &self[start_index..self.cursor]
     }
     fn get_current_word(&mut self) -> &[u8] {
-        if self.cursor >= self.data.len()
-            || self.delimiters.contains(&self.data[self.cursor]) {
+        if self.cursor >= self.len()
+            || self.is_on_delimiter() {
                 return &[]
         };
             
         println!("cursor at: {}", self.cursor);
         let mut start_index = self.cursor;
-        let last_index = self.data.len();
-        while self.cursor < last_index {
-            if self.delimiters.contains(&self.data[self.cursor]) { break };
+        while self.cursor < self.len() {
+            if self.is_on_delimiter() { break };
             self.cursor += 1;
         }
         loop {
-            if self.delimiters.contains(&self.data[start_index]) { 
+            if self.delimiters.contains(&self[start_index]) { 
                 start_index += 1;
                 break };
             if start_index == 0 { break };
             start_index -= 1;
         }
-        println!("Slice from {} to {}", start_index, self.cursor);
-        &self.data[start_index..self.cursor]
+        println!("get_current_word: Slice from {} to {}", start_index, self.cursor);
+        &self[start_index..self.cursor]
     }
 
     fn get_next_word(&mut self) -> &[u8] {
-        if self.cursor >= self.data.len() {
+        if self.cursor >= self.len() {
                 return &[]
         };
         // Handle case where we are in a word already by delegation
-        if !self.delimiters.contains(&self.data[self.cursor]) {
+        if !self.is_on_delimiter() {
             return self.get_current_word()
         };
         let mut have_seen_word = false;
         let mut start_index = self.cursor;
         let last_index = self.data.len();
         while self.cursor < last_index {
-            if !self.delimiters.contains(&self.data[self.cursor]) {
+            if !self.is_on_delimiter() {
                 if !have_seen_word {
                     start_index = self.cursor;
                     have_seen_word = true;
@@ -156,62 +195,91 @@ impl PdfFileReaderInterface for PdfFileReader {
             self.cursor += 1;
         }
         if !have_seen_word { return &[] };
-        info!("Slice from {} to {}", start_index, self.cursor);
-        &self.data[start_index..self.cursor]
+        info!("get_next_word: Slice from {} to {}", start_index, self.cursor);
+        &self[start_index..self.cursor]
     }
 
     fn get_in_charset(&mut self, valid_set: &HashSet<u8>) -> &[u8] {
         let start_index = self.cursor;
-        let last_index = self.data.len();
-        while self.cursor < last_index {
-            if !valid_set.contains(&self.data[self.cursor]) { break };
+        while self.cursor < self.len() {
+            if !valid_set.contains(&self[self.cursor]) { break };
             self.cursor += 1;
         }
-        &self.data[start_index..self.cursor]
+        &self[start_index..self.cursor]
     }
     fn get_until_charset(&mut self, delimiter_set: &HashSet<u8>) -> &[u8] {
         let start_index = self.cursor;
-        let last_index = self.data.len();
-        while self.cursor < last_index {
-            if delimiter_set.contains(&self.data[self.cursor]) { break };
+        while self.cursor < self.len() {
+            if delimiter_set.contains(&self[self.cursor]) { break };
             self.cursor += 1;
         }
-        &self.data[start_index..self.cursor]
+        &self[start_index..self.cursor]
     }
     fn get_current_line(&mut self) -> &[u8] {
-            if self.cursor >= self.data.len() {
-                return &[]
+        if self.cursor >= self.len() {
+            return &[]
         };
-            
-        info!("cursor at: {}", self.cursor);
-        let mut start_index = self.cursor;
-        let last_index = self.data.len();
-        while self.cursor < last_index {
-            if self.delimiters.contains(&self.data[self.cursor]) { break };
-            self.cursor += 1;
-        }
-        loop {
-            if self.delimiters.contains(&self.data[start_index]) { 
-                start_index += 1;
-                break };
-            if start_index == 0 { break };
-            start_index -= 1;
-        }
-        println!("Slice from {} to {}", start_index, self.cursor);
-        &self.data[start_index..self.cursor]
+        let (start_index, end_index) = self.get_line_bounds_around_index(self.cursor);
+        if end_index == self.len() {self.cursor = end_index; } else {
+            self.cursor = self.get_index_after_line_break(end_index);
+        };   
+        println!("get_current_line: Slice from {} to {}, cursor at {}", start_index, end_index, self.cursor);
+        &self[start_index..end_index]
     }
+
     fn get_rest_of_line(&mut self) -> &[u8]  {
-        &self.data[..1]
+        if self.cursor >= self.len() {
+            return &[]
+        };
+        let (_start_index, end_index) = self.get_line_bounds_around_index(self.cursor);
+        let mut start_index = self.cursor;
+        self.cursor = end_index;
+        if end_index == self.len() {self.cursor = end_index; } else {
+            self.cursor = self.get_index_after_line_break(end_index);
+        };
+        if start_index > end_index { start_index = end_index; };
+        println!("get_rest_of_line: Slice from {} to {}", start_index, end_index);
+        &self[start_index..end_index]
     }
     fn peek_preceding_part_of_line(&self) -> &[u8]  {
-        &self.data[..1]
+        let mut end_index = self.cursor;
+        if end_index >= self.len() {
+            debug_assert!(end_index == self.len());
+            end_index -= 1;
+        };
+        let (start_index, line_end) = self.get_line_bounds_around_index(end_index);
+        if end_index > line_end { end_index = line_end; };
+        //capture last character if not eol
+        if self.cursor == self.len() && !self.eol_at(self.cursor - 1) { end_index += 1 };
+        println!("peek_preceding_part_of_line: Slice from {} to {}", start_index, end_index);
+        &self[start_index..end_index]
     }
     fn peek_preceding_line(&self) -> &[u8]  {
-        &self.data[..1]
+        if self.cursor < 2 { return &[] };
+        let (start_index, end_index) = match self.len() - self.cursor {
+            0 => {
+                self.get_line_bounds_around_index(self.cursor - 1)
+            },
+            _ => {
+                let (line_start, _line_end) = self.get_line_bounds_around_index(self.cursor);
+                if line_start == 0 { return &[] };
+                self.get_line_bounds_around_index(line_start - 1)
+            }
+        };
+        println!("peek_next_line: Slice from {} to {}", start_index, end_index);
+        &self.data[start_index..end_index]
     }
     fn peek_next_line(&self) -> &[u8] {
-        &self.data[..1]
+        if self.cursor >= self.len() { return &[] };
+        let (_line_start, line_end) = self.get_line_bounds_around_index(self.cursor);
+        if line_end >= self.len() { return &[] };
+        let next_line_start = self.get_index_after_line_break(line_end);
+        let (start_index, end_index) = self.get_line_bounds_around_index(next_line_start);
+        debug_assert_eq!(next_line_start, start_index);
+        println!("peek_next_line: Slice from {} to {}", start_index, end_index);
+        &self.data[start_index..end_index]
     }
+
 }
 
 impl PdfFileReader {
@@ -224,6 +292,63 @@ impl PdfFileReader {
 
     pub fn position(&self) -> usize {
         self.cursor
+    }
+
+    fn is_on_delimiter(&self) -> bool {
+        self.delimiters.contains(&self.data[self.cursor])
+    }
+
+    fn is_on_eol(&self) -> bool {
+        if self.cursor >= self.len() { return true }
+        self.eol_markers.contains(&self.data[self.cursor])
+    }
+
+    fn eol_at(&self, index: usize) -> bool {
+        self.eol_markers.contains(&self.data[index])
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+    
+    fn get_line_bounds_around_index(&self, index: usize) -> (usize, usize) {
+        // if on line break, step back to body of line
+        let mut end_index = index;
+        if self.eol_at(index) {
+            if index == 0 { return (0, 0) }; // null line
+            if self[index] == b'\n'
+                && index > 0
+                && self[index - 1] == b'\r' {
+                    end_index -= 2;
+            } else { end_index -= 1 };
+            if self.eol_at(end_index) {return (end_index + 1, end_index + 1)}; // null line
+        }
+        let mut start_index = end_index; // = index as adjusted for eol issues above
+
+        while end_index < self.len() {
+            if self.eol_at(end_index) {
+                break
+            };
+            end_index += 1;
+        }
+
+        loop {
+            if self.eol_at(start_index) { 
+                start_index += 1;
+                break
+            };
+            if start_index == 0 { break };
+            start_index -= 1;
+        }
+
+        (start_index, end_index)
+    }
+
+    fn get_index_after_line_break(&self, index: usize) -> usize {
+        if !self.eol_at(index) || index >= self.len() { return index };
+        // Increment by 2 in instance where current value is \r and next is \n; else increment by 1
+        if self[index] == b'\r' && index + 1 < self.len() && self[index + 1] == b'\n' { return index + 2};
+        return index + 1
     }
 }
 
@@ -238,12 +363,6 @@ mod tests {
     fn get_word_test() -> Vec<u8> {
         Vec::from(
             "\nAa..\rBb.. Cc..".to_string()
-        )
-    }
-
-    fn get_line_test() -> Vec<u8> {
-        Vec::from(
-            "\nAa..\rBb.. Cc..\r\nDd..\r\rEe..".to_string()
         )
     }
 
@@ -296,7 +415,7 @@ mod tests {
         assert_eq!(reader.get_n(1), &test_data[14..]);
         assert_eq!(reader.position(), 15);
 
-        reader.seek(SeekFrom::Start(0));
+        reader.seek(SeekFrom::Start(0)).unwrap();
         assert_eq!(reader.get_n(0), &[]);
         assert_eq!(reader.position(), 0);
         assert_eq!(reader.get_n(100), &test_data[..]);
@@ -304,7 +423,7 @@ mod tests {
         assert_eq!(reader.get_n(100), &[]);
         assert_eq!(reader.position(), 15);
 
-        reader.seek(SeekFrom::Start(0));
+        reader.seek(SeekFrom::Start(0)).unwrap();
         assert_eq!(reader.get_n(7), &test_data[..7]);
         assert_eq!(reader.position(), 7);
         assert_eq!(reader.get_n(8), &test_data[7..]);
@@ -520,10 +639,161 @@ mod tests {
         assert_eq!(reader.position(), 15);
     }
 
-    fn iteration_test() {
-        let reader = PdfFileReader::new("data/simple_pdf.pdf").unwrap();
-        //let lines = reader.get_ref().lines();
-        //println!("{}", lines.next_back());
+    fn get_line_test() -> Vec<u8> {
+        Vec::from(
+            "\nAa..\rBb.. Cc..\r\nDd..\r\rEe..".to_string()
+        )
+    }
 
+    #[test]
+    fn test_get_current_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let (target_slice, target_ix) = match ix {
+                0 => (&first_line[0..0], 1),
+                1 ..= 5 => (&first_line[..], 6),
+                6 ..= 16 => (&second_line[..], 17),
+                17 ..= 21 => (&third_line[..], 22),
+                22 => (&first_line[0..0], 23),
+                23 ..= 26 => (&fourth_line[..], 27),
+                _ => (&first_line[0..0], 27)
+            };
+            assert_eq!(reader.get_current_line(), target_slice);
+            println!("{}", reader.position());
+            assert_eq!(reader.position(), target_ix);
+        }
+    }
+
+    #[test]
+    fn test_get_rest_of_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let (target_slice, target_ix) = match ix {
+                0 => (&first_line[0..0], 1),
+                1 ..= 5 => (&first_line[(ix - 1)..], 6),
+                6 ..= 16 => {
+                    let mut start_index = ix - 6;
+                    // Need to truncate because 2 eol characters are not in the return slice
+                    if start_index > 9 {start_index = 9}; 
+                    (&second_line[start_index..], 17)
+                },
+                17 ..= 21 => (&third_line[(ix - 17)..], 22),
+                22 => (&first_line[0..0], 23),
+                23 ..= 26 => (&fourth_line[(ix - 23)..], 27),
+                _ => (&first_line[0..0], 27)
+            };
+            println!("testing index: {}", ix);
+            assert_eq!(reader.get_rest_of_line(), target_slice);
+            assert_eq!(reader.position(), target_ix);
+        }
+    }
+
+    #[test]
+    fn test_peek_preceding_part_of_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            println!("{}", ix);
+            let target_slice = match ix {
+                1 ..= 5 => &first_line[..(ix - 1)],
+                6 ..= 16 => {
+                    let mut end_index = ix - 6;
+                    // Need to truncate because 2 eol characters are not in the return slice
+                    if end_index > 9 {end_index = 9}; 
+                    &second_line[..end_index]
+                },
+                17 ..= 21 => &third_line[..(ix - 17)],
+                23 ..= 28 => &fourth_line[..(ix - 23)],
+                _ => &[]
+            };
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_preceding_part_of_line(), target_slice);
+            // Should be idempotent
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_preceding_part_of_line(), target_slice);
+        }
+    }
+
+    #[test]
+    fn test_peek_next_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let target_slice = match ix {
+                0 => &first_line[..],
+                1 ..= 5 => &second_line[..],
+                6 ..= 16 => &third_line[..],
+                22 => &fourth_line[..],
+                _ => &[]
+            };
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_next_line(), target_slice);
+            // should be idempotent
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_next_line(), target_slice);
+        }
+    }
+
+    #[test]
+    fn test_peek_preceding_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let target_slice = match ix {
+                0 ..= 5 => &[],
+                6 ..= 16 => &first_line[..],
+                17 ..= 21 => &second_line[..],
+                22 => &third_line[..],
+                27 => &fourth_line[..],
+                _ => &[]
+            };
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_preceding_line(), target_slice);
+            // should be idempotent
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_preceding_line(), target_slice);
+        }
     }
 }

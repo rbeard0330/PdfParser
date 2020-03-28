@@ -78,7 +78,7 @@ impl Filter {
         let output_data = match self {
             ASCIIHex => Filter::apply_ascii_hex(data),
             ASCII85 => Filter::apply_ascii_85(data),
-            LZW(params) => Filter::apply_LZW(data, params),
+            LZW(params) => Filter::apply_lzw(data, params),
             Flate(params) => Filter::apply_flate(data, params),
             _ => Err(ErrorKind::FilterError(
                 format!("Unsupported filter: {}", self),
@@ -163,7 +163,7 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_LZW(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
+    fn apply_lzw(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
         Ok(data)
     }
 
