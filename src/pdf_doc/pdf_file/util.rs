@@ -1,3 +1,7 @@
+use std::convert::TryInto;
+
+use crate::errors::*;
+
 pub fn peek_ahead_by_n(bytes: &Vec<u8>, index: usize, n: usize) -> Option<u8> {
     if index + n >= bytes.len() {
         return None;
@@ -31,6 +35,14 @@ pub fn is_eol(c: u8) -> bool {
 // pub fn is_letter(c: u8) -> bool {
 //     (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
 // }
+
+pub fn to_binary_vec(s: &str) -> Result<Vec<u8>> {
+    let mut output_vec = Vec::new();
+    for c in s.bytes() {
+        output_vec.push(c);
+    };
+    Ok(output_vec)
+}
 
 pub fn is_body_keyword_letter(c: u8) -> bool {
     match c {

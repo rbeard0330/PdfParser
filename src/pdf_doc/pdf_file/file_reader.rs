@@ -11,7 +11,7 @@ const PDF_DELIMITERS: [u8; 17] = [
 ];
 
 
-
+#[derive(Clone, Debug)]
 pub struct PdfFileReader {
     data: Vec<u8>,
     cursor: usize,
@@ -25,34 +25,39 @@ pub trait PdfFileReaderInterface: Index<Range<usize>> + Sized {
     fn new(path: &str) -> Result<Self>;
 
     /// Advance the current position by n and return the data (including current position and excluding end position) as a &str.  Any invalid ASCII characters are an error.
-    fn get_n(&mut self, n: usize) -> &[u8];
+    fn read_n(&mut self, n: usize) -> &[u8];
     /// Return the next n characters (including current position) as a &str without advancing current position.  Any invalid ASCII characters are an error.
     fn peek_ahead_n(&self, n: usize) -> &[u8];
     /// Return the preceding n characters (not including current position) as a &str without changing current position.  Any invalid ASCII characters are an error.
     fn peek_behind_n(&self, n: usize) -> &[u8];
 
     /// Advance to the next PDF standard delimiter and return characters as a &str.
-    fn get_until_delimiter(&mut self) -> &[u8];
+    fn read_until_delimiter(&mut self) -> &[u8];
     /// Advance to the next PDF standard delimiter and return characters from last previous delimiter up to that point.  Returns an empty str if the current position is a delimiter.
-    fn get_current_word(&mut self) -> &[u8];
-    /// Advance past the next non-delimiter character to the next subsequent delimiter and return characters between teh delimiters.  This method works the same as get_current_word if the current position is not a delimiter.
-    fn get_next_word(&mut self) -> &[u8];
+    fn read_current_word(&mut self) -> &[u8];
+    /// Advance past the next non-delimiter character to the next subsequent delimiter and return characters between teh delimiters.  This method works the same as read_current_word if the current position is not a delimiter.
+    fn read_next_word(&mut self) -> &[u8];
 
     /// Advance until a character that is not in the provided set is reached, and return the characters.  Returns an empty slice if the current position is not in the set.
-    fn get_in_charset(&mut self, valid_set: &HashSet<u8>) -> &[u8];
+    fn read_in_charset(&mut self, valid_set: &HashSet<u8>) -> &[u8];
     /// Advance until a character that is in the provided set is reached, and return the characters.  Returns an empty slice if the current position is in the set.
-    fn get_until_charset(&mut self, delimiter_set: &HashSet<u8>) -> &[u8];
+    fn read_until_charset(&mut self, delimiter_set: &HashSet<u8>) -> &[u8];
     
     /// Advance to the first character of the next line and return characters from start of current line.  EOL markers are stripped out.
-    fn get_current_line(&mut self) -> &[u8];
+    fn read_current_line(&mut self) -> &[u8];
+    fn peek_current_line(&self) -> &[u8];
     /// Advance to the first character of the next line and return characters from (and including) the current position.  EOL markers are stripped out.
-    fn get_rest_of_line(&mut self) -> &[u8];
+    fn read_rest_of_line(&mut self) -> &[u8];
     /// Return characters from beginning of current line through (but excluding) the current position.  
     fn peek_preceding_part_of_line(&self) -> &[u8];
     /// Return characters in preceding line without changing position.  EOL markers are stripped out.  
     fn peek_preceding_line(&self) -> &[u8];
     /// Return characters in next line without changing position.  EOL markers are stripped out.  
     fn peek_next_line(&self) -> &[u8];
+
+    fn step_to_end_of_prior_line(&mut self) -> isize;
+    fn step_to_start_of_current_line(&mut self) -> isize;
+    fn step_to_start_of_next_line(&mut self) -> isize;
     
 }
 
@@ -122,26 +127,27 @@ impl PdfFileReaderInterface for PdfFileReader {
             eol_markers: PDF_EOL_MARKERS.iter().cloned().collect(),
         })
     }
-    fn get_n(&mut self, n: usize) -> &[u8] {
+    fn read_n(&mut self, n: usize) -> &[u8] {
         let old_cursor = self.cursor;
         if old_cursor >= self.len() { return &[] };
         self.cursor = self.bound_n((self.cursor + n) as i64);
-        println!("get_n: {} Slice from: {} to {}", n, old_cursor, self.cursor);
-        &self[(old_cursor) .. (self.cursor)]
+        let end_index = self.cursor;
+        trace!("read_n: {} Slice from: {} to {}", n, old_cursor, self.cursor);
+        &self[old_cursor .. end_index]
     }
     fn peek_ahead_n(&self, n: usize) -> &[u8] {
         if self.cursor >= self.len() { return &[] };
         let end_index = self.bound_n((self.cursor + n) as i64);
-        println!("peek_ahead_n: {} Slice from: {} to {}", n, self.cursor, end_index);
+        trace!("peek_ahead_n: {} Slice from: {} to {}", n, self.cursor, end_index);
         &self[self.cursor..end_index]
     }
     fn peek_behind_n(&self, n: usize) -> &[u8] {
         if self.cursor <= 0 { return &[] };
         let start_index = self.bound_n(self.cursor as i64 - n as i64);
-        println!("peek_behind_n: {} Slice from: {} to {}", n, start_index, self.cursor);
+        trace!("peek_behind_n: {} Slice from: {} to {}", n, start_index, self.cursor);
         &self[start_index..self.cursor]
     }
-    fn get_until_delimiter(&mut self) -> &[u8] {
+    fn read_until_delimiter(&mut self) -> &[u8] {
         let start_index = self.cursor;
         while self.cursor < self.len() {
             if self.is_on_delimiter() { break };
@@ -149,13 +155,13 @@ impl PdfFileReaderInterface for PdfFileReader {
         }
         &self[start_index..self.cursor]
     }
-    fn get_current_word(&mut self) -> &[u8] {
+    fn read_current_word(&mut self) -> &[u8] {
         if self.cursor >= self.len()
             || self.is_on_delimiter() {
                 return &[]
         };
             
-        println!("cursor at: {}", self.cursor);
+        trace!("cursor at: {}", self.cursor);
         let mut start_index = self.cursor;
         while self.cursor < self.len() {
             if self.is_on_delimiter() { break };
@@ -168,17 +174,17 @@ impl PdfFileReaderInterface for PdfFileReader {
             if start_index == 0 { break };
             start_index -= 1;
         }
-        println!("get_current_word: Slice from {} to {}", start_index, self.cursor);
+        trace!("read_current_word: Slice from {} to {}", start_index, self.cursor);
         &self[start_index..self.cursor]
     }
 
-    fn get_next_word(&mut self) -> &[u8] {
+    fn read_next_word(&mut self) -> &[u8] {
         if self.cursor >= self.len() {
                 return &[]
         };
         // Handle case where we are in a word already by delegation
         if !self.is_on_delimiter() {
-            return self.get_current_word()
+            return self.read_current_word()
         };
         let mut have_seen_word = false;
         let mut start_index = self.cursor;
@@ -195,11 +201,11 @@ impl PdfFileReaderInterface for PdfFileReader {
             self.cursor += 1;
         }
         if !have_seen_word { return &[] };
-        info!("get_next_word: Slice from {} to {}", start_index, self.cursor);
+        info!("read_next_word: Slice from {} to {}", start_index, self.cursor);
         &self[start_index..self.cursor]
     }
 
-    fn get_in_charset(&mut self, valid_set: &HashSet<u8>) -> &[u8] {
+    fn read_in_charset(&mut self, valid_set: &HashSet<u8>) -> &[u8] {
         let start_index = self.cursor;
         while self.cursor < self.len() {
             if !valid_set.contains(&self[self.cursor]) { break };
@@ -207,7 +213,7 @@ impl PdfFileReaderInterface for PdfFileReader {
         }
         &self[start_index..self.cursor]
     }
-    fn get_until_charset(&mut self, delimiter_set: &HashSet<u8>) -> &[u8] {
+    fn read_until_charset(&mut self, delimiter_set: &HashSet<u8>) -> &[u8] {
         let start_index = self.cursor;
         while self.cursor < self.len() {
             if delimiter_set.contains(&self[self.cursor]) { break };
@@ -215,7 +221,7 @@ impl PdfFileReaderInterface for PdfFileReader {
         }
         &self[start_index..self.cursor]
     }
-    fn get_current_line(&mut self) -> &[u8] {
+    fn read_current_line(&mut self) -> &[u8] {
         if self.cursor >= self.len() {
             return &[]
         };
@@ -223,11 +229,19 @@ impl PdfFileReaderInterface for PdfFileReader {
         if end_index == self.len() {self.cursor = end_index; } else {
             self.cursor = self.get_index_after_line_break(end_index);
         };   
-        println!("get_current_line: Slice from {} to {}, cursor at {}", start_index, end_index, self.cursor);
+        trace!("read_current_line: Slice from {} to {}, cursor at {}", start_index, end_index, self.cursor);
+        &self[start_index..end_index]
+    }
+    fn peek_current_line(&self) -> &[u8] {
+        if self.cursor >= self.len() {
+            return &[]
+        };
+        let (start_index, end_index) = self.get_line_bounds_around_index(self.cursor);
+        trace!("read_current_line: Slice from {} to {}, cursor at {}", start_index, end_index, self.cursor);
         &self[start_index..end_index]
     }
 
-    fn get_rest_of_line(&mut self) -> &[u8]  {
+    fn read_rest_of_line(&mut self) -> &[u8]  {
         if self.cursor >= self.len() {
             return &[]
         };
@@ -238,7 +252,7 @@ impl PdfFileReaderInterface for PdfFileReader {
             self.cursor = self.get_index_after_line_break(end_index);
         };
         if start_index > end_index { start_index = end_index; };
-        println!("get_rest_of_line: Slice from {} to {}", start_index, end_index);
+        trace!("read_rest_of_line: Slice from {} to {}", start_index, end_index);
         &self[start_index..end_index]
     }
     fn peek_preceding_part_of_line(&self) -> &[u8]  {
@@ -251,7 +265,7 @@ impl PdfFileReaderInterface for PdfFileReader {
         if end_index > line_end { end_index = line_end; };
         //capture last character if not eol
         if self.cursor == self.len() && !self.eol_at(self.cursor - 1) { end_index += 1 };
-        println!("peek_preceding_part_of_line: Slice from {} to {}", start_index, end_index);
+        trace!("peek_preceding_part_of_line: Slice from {} to {}", start_index, end_index);
         &self[start_index..end_index]
     }
     fn peek_preceding_line(&self) -> &[u8]  {
@@ -266,7 +280,7 @@ impl PdfFileReaderInterface for PdfFileReader {
                 self.get_line_bounds_around_index(line_start - 1)
             }
         };
-        println!("peek_next_line: Slice from {} to {}", start_index, end_index);
+        trace!("peek_next_line: Slice from {} to {}", start_index, end_index);
         &self.data[start_index..end_index]
     }
     fn peek_next_line(&self) -> &[u8] {
@@ -276,8 +290,44 @@ impl PdfFileReaderInterface for PdfFileReader {
         let next_line_start = self.get_index_after_line_break(line_end);
         let (start_index, end_index) = self.get_line_bounds_around_index(next_line_start);
         debug_assert_eq!(next_line_start, start_index);
-        println!("peek_next_line: Slice from {} to {}", start_index, end_index);
+        trace!("peek_next_line: Slice from {} to {}", start_index, end_index);
         &self.data[start_index..end_index]
+    }
+
+    fn step_to_end_of_prior_line(&mut self) -> isize {
+        //if self.cursor < 2 { return 0 };
+        let (_start_index, end_index) = match self.len() - self.cursor {
+            0 => {
+                self.get_line_bounds_around_index(self.cursor - 1)
+            },
+            _ => {
+                let (line_start, _line_end) = self.get_line_bounds_around_index(self.cursor);
+                if line_start == 0 { return 0 };
+                self.get_line_bounds_around_index(line_start - 1)
+            }
+        };
+        trace!("cursor at: {}; prior line extends from: {} to {}", self.cursor, _start_index, end_index);
+        let offset = end_index as isize - self.cursor as isize;
+        self.cursor = end_index;
+        offset
+    }
+    fn step_to_start_of_next_line(&mut self) -> isize {
+        if self.cursor >= self.len() { return 0 };
+        let (_line_start, line_end) = self.get_line_bounds_around_index(self.cursor);
+        if line_end >= self.len() { return 0 };
+        let next_line_start = self.get_index_after_line_break(line_end);
+        let (start_index, _end_index) = self.get_line_bounds_around_index(next_line_start);
+        debug_assert_eq!(next_line_start, start_index);
+        let offset: isize = start_index as isize - self.cursor as isize;
+        self.cursor = start_index;
+        offset
+    }
+    fn step_to_start_of_current_line(&mut self) -> isize {
+        if self.cursor >= self.len() { return 0 };
+        let (start_index, _lend_index) = self.get_line_bounds_around_index(self.cursor);
+        let offset = start_index as isize - self.cursor as isize;
+        self.cursor = start_index;
+        offset
     }
 
 }
@@ -396,7 +446,7 @@ mod tests {
         reader.seek(SeekFrom::Start(data_len as u64 + 100)).unwrap();
         assert_eq!(reader.position(), data_len);
         for i in 0..(data_len as i64 + 1) {
-            println!("{}", i);
+            trace!("{}", i);
             reader.seek(SeekFrom::End(-1 * i)).unwrap();
             assert_eq!(reader.position(), data_len - i as usize);
             reader.seek(SeekFrom::End(-1 * i)).unwrap();
@@ -407,26 +457,26 @@ mod tests {
     }
 
     #[test]
-    fn test_get_n() {
+    fn test_read_n() {
         let test_data = get_test_data();
         let mut reader = get_reader(&test_data);
-        assert_eq!(reader.get_n(14), &test_data[..14]);
+        assert_eq!(reader.read_n(14), &test_data[..14]);
         assert_eq!(reader.position(), 14);
-        assert_eq!(reader.get_n(1), &test_data[14..]);
+        assert_eq!(reader.read_n(1), &test_data[14..]);
         assert_eq!(reader.position(), 15);
 
         reader.seek(SeekFrom::Start(0)).unwrap();
-        assert_eq!(reader.get_n(0), &[]);
+        assert_eq!(reader.read_n(0), &[]);
         assert_eq!(reader.position(), 0);
-        assert_eq!(reader.get_n(100), &test_data[..]);
+        assert_eq!(reader.read_n(100), &test_data[..]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_n(100), &[]);
+        assert_eq!(reader.read_n(100), &[]);
         assert_eq!(reader.position(), 15);
 
         reader.seek(SeekFrom::Start(0)).unwrap();
-        assert_eq!(reader.get_n(7), &test_data[..7]);
+        assert_eq!(reader.read_n(7), &test_data[..7]);
         assert_eq!(reader.position(), 7);
-        assert_eq!(reader.get_n(8), &test_data[7..]);
+        assert_eq!(reader.read_n(8), &test_data[7..]);
         assert_eq!(reader.position(), 15);
     }
 
@@ -459,7 +509,7 @@ mod tests {
         assert_eq!(reader.peek_behind_n(100), &[]);
         assert_eq!(reader.position(), 0);
         
-        reader.get_n(100);
+        reader.read_n(100);
         assert_eq!(reader.position(), 15);
 
         assert_eq!(reader.peek_behind_n(0), &[]);
@@ -477,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_until_charset() {
+    fn test_read_until_charset() {
         let test_data = get_test_data();
         let mut reader = get_reader(&test_data);
         let mut delimiter = HashSet::new();
@@ -487,155 +537,155 @@ mod tests {
         assert!(!test_data.contains(&20));  // Intended to be a delimiter not in the data
         delimiter.insert(20);
 
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 0);
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 0);
 
-        assert_eq!(reader.get_n(1), &test_data[0..1]);
-        assert_eq!(reader.get_until_charset(&delimiter), &test_data[1..10]);
+        assert_eq!(reader.read_n(1), &test_data[0..1]);
+        assert_eq!(reader.read_until_charset(&delimiter), &test_data[1..10]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 10);
 
-        assert_eq!(reader.get_n(1), &test_data[10..11]);
-        assert_eq!(reader.get_until_charset(&delimiter), &test_data[11..]);
+        assert_eq!(reader.read_n(1), &test_data[10..11]);
+        assert_eq!(reader.read_until_charset(&delimiter), &test_data[11..]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_until_charset(&delimiter), &[]);
+        assert_eq!(reader.read_until_charset(&delimiter), &[]);
         assert_eq!(reader.position(), 15);
     }
 
     #[test]
-    fn test_get_in_charset() {
+    fn test_read_in_charset() {
         let test_data = get_test_data();
         let mut reader = get_reader(&test_data);
         let mut charset: HashSet<u8> = (0..100).into_iter().collect();
         charset.remove(&test_data[0]);
         charset.remove(&test_data[10]);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 0);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 0);
-        assert_eq!(reader.get_n(1), &test_data[0..1]);
-        assert_eq!(reader.get_in_charset(&charset), &test_data[1..10]);
+        assert_eq!(reader.read_n(1), &test_data[0..1]);
+        assert_eq!(reader.read_in_charset(&charset), &test_data[1..10]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_n(1), &test_data[10..11]);
-        assert_eq!(reader.get_in_charset(&charset), &test_data[11..]);
+        assert_eq!(reader.read_n(1), &test_data[10..11]);
+        assert_eq!(reader.read_in_charset(&charset), &test_data[11..]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_in_charset(&charset), &[]);
+        assert_eq!(reader.read_in_charset(&charset), &[]);
         assert_eq!(reader.position(), 15);
     }
 
     #[test]
-    fn test_get_until_delimiters() {
+    fn test_read_until_delimiters() {
         let test_data = get_test_data();
         let mut reader = get_reader(&test_data);
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), 0);
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), 0);
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_until_delimiter(), &test_data[1..(b'\t' as usize)]); // = 9
+        assert_eq!(reader.read_until_delimiter(), &test_data[1..(b'\t' as usize)]); // = 9
         assert_eq!(reader.position(), (b'\t' as usize));
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), (b'\t' as usize));
         reader.seek(SeekFrom::Current(-2)).unwrap();
-        assert_eq!(reader.get_until_delimiter(), &test_data[(b'\t' as usize - 2)..(b'\t' as usize)]);
+        assert_eq!(reader.read_until_delimiter(), &test_data[(b'\t' as usize - 2)..(b'\t' as usize)]);
         assert_eq!(reader.position(), (b'\t' as usize));
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_until_delimiter(), &test_data[(b'\t' as usize + 1)..(b'\n' as usize)]); // = 10
+        assert_eq!(reader.read_until_delimiter(), &test_data[(b'\t' as usize + 1)..(b'\n' as usize)]); // = 10
         assert_eq!(reader.position(), (b'\n' as usize));
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), (b'\n' as usize));
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_until_delimiter(), &test_data[(b'\n' as usize + 1)..12]); // form feed
+        assert_eq!(reader.read_until_delimiter(), &test_data[(b'\n' as usize + 1)..12]); // form feed
         assert_eq!(reader.position(), 12);
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), 12);
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_until_delimiter(), &test_data[13..(b'\r' as usize)]); // 13
+        assert_eq!(reader.read_until_delimiter(), &test_data[13..(b'\r' as usize)]); // 13
         assert_eq!(reader.position(), b'\r' as usize);
-        assert_eq!(reader.get_until_delimiter(), &[]);
+        assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), b'\r' as usize);
     }
 
     #[test]
-    fn test_get_current_word() {
+    fn test_read_current_word() {
         let test_data = get_word_test();
         let first_word = Vec::from("Aa..".to_string());
         let second_word = Vec::from("Bb..".to_string());
         let third_word = Vec::from("Cc..".to_string());
         let mut reader = get_reader(&test_data);
-        assert_eq!(reader.get_current_word(), &[]);
+        assert_eq!(reader.read_current_word(), &[]);
         assert_eq!(reader.position(), 0);
 
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_current_word(), &first_word[..]);
+        assert_eq!(reader.read_current_word(), &first_word[..]);
         assert_eq!(reader.position(), 5);
 
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_current_word(), &first_word[..]);
+        assert_eq!(reader.read_current_word(), &first_word[..]);
         assert_eq!(reader.position(), 5);
-        assert_eq!(reader.get_current_word(), &[]);
+        assert_eq!(reader.read_current_word(), &[]);
         assert_eq!(reader.position(), 5);
 
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_current_word(), &second_word[..]);
+        assert_eq!(reader.read_current_word(), &second_word[..]);
         assert_eq!(reader.position(), 10);
         
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_current_word(), &second_word[..]);
+        assert_eq!(reader.read_current_word(), &second_word[..]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_current_word(), &[]);
+        assert_eq!(reader.read_current_word(), &[]);
         assert_eq!(reader.position(), 10);
 
         reader.seek(SeekFrom::Current(1)).unwrap();
-        assert_eq!(reader.get_current_word(), &third_word[..]);
+        assert_eq!(reader.read_current_word(), &third_word[..]);
         assert_eq!(reader.position(), 15);
         
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_current_word(), &third_word[..]);
+        assert_eq!(reader.read_current_word(), &third_word[..]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_current_word(), &[]);
+        assert_eq!(reader.read_current_word(), &[]);
         assert_eq!(reader.position(), 15);
     }
 
     #[test]
-    fn test_get_next_word() {
+    fn test_read_next_word() {
         let test_data = get_word_test();
         let first_word = Vec::from("Aa..".to_string());
         let second_word = Vec::from("Bb..".to_string());
         let third_word = Vec::from("Cc..".to_string());
         let mut reader = get_reader(&test_data);
-        assert_eq!(reader.get_next_word(), &first_word[..]);
+        assert_eq!(reader.read_next_word(), &first_word[..]);
         assert_eq!(reader.position(), 5);
 
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_next_word(), &first_word[..]);
+        assert_eq!(reader.read_next_word(), &first_word[..]);
         assert_eq!(reader.position(), 5);
-        assert_eq!(reader.get_next_word(), &second_word[..]);
+        assert_eq!(reader.read_next_word(), &second_word[..]);
         assert_eq!(reader.position(), 10);
         
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_next_word(), &second_word[..]);
+        assert_eq!(reader.read_next_word(), &second_word[..]);
         assert_eq!(reader.position(), 10);
-        assert_eq!(reader.get_next_word(), &third_word[..]);
+        assert_eq!(reader.read_next_word(), &third_word[..]);
         assert_eq!(reader.position(), 15);
         
         reader.seek(SeekFrom::Current(-1)).unwrap();
-        assert_eq!(reader.get_next_word(), &third_word[..]);
+        assert_eq!(reader.read_next_word(), &third_word[..]);
         assert_eq!(reader.position(), 15);
-        assert_eq!(reader.get_next_word(), &[]);
+        assert_eq!(reader.read_next_word(), &[]);
         assert_eq!(reader.position(), 15);
     }
 
@@ -646,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_current_line() {
+    fn test_read_current_line() {
         let test_data = get_line_test();
 
         let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
@@ -667,14 +717,43 @@ mod tests {
                 23 ..= 26 => (&fourth_line[..], 27),
                 _ => (&first_line[0..0], 27)
             };
-            assert_eq!(reader.get_current_line(), target_slice);
-            println!("{}", reader.position());
+            assert_eq!(reader.read_current_line(), target_slice);
+            trace!("{}", reader.position());
             assert_eq!(reader.position(), target_ix);
         }
     }
 
     #[test]
-    fn test_get_rest_of_line() {
+    fn test_peek_current_line() {
+        let test_data = get_line_test();
+
+        let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
+        let second_line = Vec::from("Bb.. Cc.."); // starts at 6, ends at 16
+        let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
+        let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
+
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let (target_slice, _target_ix) = match ix {
+                0 => (&first_line[0..0], 1),
+                1 ..= 5 => (&first_line[..], 6),
+                6 ..= 16 => (&second_line[..], 17),
+                17 ..= 21 => (&third_line[..], 22),
+                22 => (&first_line[0..0], 23),
+                23 ..= 26 => (&fourth_line[..], 27),
+                _ => (&first_line[0..0], 27)
+            };
+            assert_eq!(reader.peek_current_line(), target_slice);
+            assert_eq!(reader.position(), ix);
+            assert_eq!(reader.peek_current_line(), target_slice);
+            assert_eq!(reader.position(), ix);
+        }
+    }
+
+    #[test]
+    fn test_read_rest_of_line() {
         let test_data = get_line_test();
 
         let first_line = Vec::from("Aa.."); // starts at 1, ends at 5
@@ -700,8 +779,8 @@ mod tests {
                 23 ..= 26 => (&fourth_line[(ix - 23)..], 27),
                 _ => (&first_line[0..0], 27)
             };
-            println!("testing index: {}", ix);
-            assert_eq!(reader.get_rest_of_line(), target_slice);
+            trace!("testing index: {}", ix);
+            assert_eq!(reader.read_rest_of_line(), target_slice);
             assert_eq!(reader.position(), target_ix);
         }
     }
@@ -719,7 +798,7 @@ mod tests {
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
-            println!("{}", ix);
+            trace!("{}", ix);
             let target_slice = match ix {
                 1 ..= 5 => &first_line[..(ix - 1)],
                 6 ..= 16 => {
@@ -796,4 +875,68 @@ mod tests {
             assert_eq!(reader.peek_preceding_line(), target_slice);
         }
     }
+    #[test]
+    fn test_step_to_end_of_prior_line() {
+        let test_data = get_line_test();
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let target_ix = match ix {
+                0 => 0,
+                1 ..= 5 => 0,
+                6 ..= 16 => 5,
+                17 ..= 21 => 15,
+                22 => 21,
+                23 ..= 26 => 22,
+                _ => ix
+            };
+            trace!("testing index: {}", ix);
+            reader.step_to_end_of_prior_line();
+            assert_eq!(reader.position(), target_ix);
+        }
+    }
+
+    #[test]
+    fn test_step_to_start_of_next_line() {
+        let test_data = get_line_test();
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let target_ix = match ix {
+                0 => 1,
+                1 ..= 5 => 6,
+                6 ..= 16 => 17,
+                17 ..= 21 => 22,
+                22 => 23,
+                _ => ix
+            };
+            trace!("testing index: {}", ix);
+            reader.step_to_start_of_next_line();
+            assert_eq!(reader.position(), target_ix);
+        }
+    }
+    #[test]
+    fn test_step_to_start_of_current_line() {
+        let test_data = get_line_test();
+        let mut reader = get_reader(&test_data);
+
+        for ix in 0..test_data.len() + 1 {
+            reader.seek(SeekFrom::Start(ix as u64)).unwrap();
+            let target_ix = match ix {
+                0 => 0,
+                1 ..= 5 => 1,
+                6 ..= 16 => 6,
+                17 ..= 21 => 17,
+                22 => 22,
+                23 ..= 26 => 23,
+                _ => ix
+            };
+            trace!("testing index: {}", ix);
+            reader.step_to_start_of_current_line();
+            assert_eq!(reader.position(), target_ix);
+        }
+    }
+
 }

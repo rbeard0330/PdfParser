@@ -458,13 +458,13 @@ impl fmt::Display for PdfObject {
 }
 
 #[derive(Debug, Clone)]
-struct PdfObjectReference<T: PdfFileInterface<PdfObject>> {
+struct PdfObjectReference<T: ParserInterface<PdfObject>> {
     id: u32,
     gen: u32,
     data: Weak<T>,
 }
 
-impl<T: PdfFileInterface<PdfObject> + Debug> PdfObjectReference<T> {
+impl<T: ParserInterface<PdfObject> + Debug> PdfObjectReference<T> {
     fn get(&self) -> Result<SharedObject> {
         let usable_ref = self.data.upgrade().expect("Could not access weak ref in File Interface get");
         usable_ref.retrieve_object_by_ref(self.id, self.gen)

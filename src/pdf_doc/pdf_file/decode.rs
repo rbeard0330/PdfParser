@@ -181,7 +181,7 @@ impl Filter {
     }
 }
 
-pub fn decode_stream(map: PdfMap, bytes: Vec<u8>) -> Result<PdfObject> {
+pub fn decode_stream(map: PdfMap, bytes: &[u8]) -> Result<PdfObject> {
     //Check size
     let expected_byte_length = map
         .get("Length")
@@ -199,7 +199,7 @@ pub fn decode_stream(map: PdfMap, bytes: Vec<u8>) -> Result<PdfObject> {
     if let StreamType::Image = stream_type {
         return Ok(PdfObject::new_binary_stream(PdfBinaryStream{
             attributes: map,
-            data: bytes}))
+            data: Vec::from(bytes)}))
     };
 
     //Extract filters
@@ -232,7 +232,7 @@ pub fn decode_stream(map: PdfMap, bytes: Vec<u8>) -> Result<PdfObject> {
         .collect::<Result<Vec<decode::Filter>>>()?;
     let filtered_data = filter_array
         .into_iter()
-        .fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
+        .fold(Ok(Vec::from(bytes)), |data, filter| filter.apply(data))?;
 
     Ok(PdfObject::new_binary_stream(PdfBinaryStream{
         attributes: map, data: filtered_data}))
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn flate_example() {
-        let _pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
+        let _pdf_file = Parser::create_pdf_from_file("data/document.pdf").unwrap();
         //TODO: Example
     }
 }
