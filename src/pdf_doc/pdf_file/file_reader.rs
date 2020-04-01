@@ -2,6 +2,7 @@ use std::io::{Seek, SeekFrom};
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::ops::{Index, Range, RangeTo, RangeFrom, RangeFull};
+use std::rc::Rc;
 
 use crate::errors::*;
 
@@ -13,7 +14,7 @@ const PDF_DELIMITERS: [u8; 17] = [
 
 #[derive(Clone, Debug)]
 pub struct PdfFileReader {
-    data: Vec<u8>,
+    data: Rc<Vec<u8>>,
     cursor: usize,
     delimiters: HashSet<u8>,
     eol_markers: HashSet<u8>,
@@ -26,6 +27,7 @@ pub trait PdfFileReaderInterface: Index<Range<usize>> + Sized {
 
     /// Advance the current position by n and return the data (including current position and excluding end position) as a &str.  Any invalid ASCII characters are an error.
     fn read_n(&mut self, n: usize) -> &[u8];
+    fn read_and_copy_n(&mut self, n: usize) -> Vec<u8>;
     /// Return the next n characters (including current position) as a &str without advancing current position.  Any invalid ASCII characters are an error.
     fn peek_ahead_n(&self, n: usize) -> &[u8];
     /// Return the preceding n characters (not including current position) as a &str without changing current position.  Any invalid ASCII characters are an error.
@@ -121,7 +123,7 @@ impl Index<RangeFull> for PdfFileReader {
 impl PdfFileReaderInterface for PdfFileReader {
     fn new(path: &str) -> Result<Self> {
         Ok(PdfFileReader{
-            data: std::fs::read(path)?,
+            data: Rc::new(std::fs::read(path)?),
             cursor: 0,
             delimiters: PDF_DELIMITERS.iter().cloned().collect(),
             eol_markers: PDF_EOL_MARKERS.iter().cloned().collect(),
@@ -134,6 +136,9 @@ impl PdfFileReaderInterface for PdfFileReader {
         let end_index = self.cursor;
         trace!("read_n: {} Slice from: {} to {}", n, old_cursor, self.cursor);
         &self[old_cursor .. end_index]
+    }
+    fn read_and_copy_n(&mut self, n: usize) -> Vec<u8> {
+        Vec::from(self.read_n(n))
     }
     fn peek_ahead_n(&self, n: usize) -> &[u8] {
         if self.cursor >= self.len() { return &[] };
@@ -340,6 +345,15 @@ impl PdfFileReader {
         n as usize
     }
 
+    pub fn spawn_clone(&self) -> PdfFileReader {
+        PdfFileReader{
+            data: Rc::clone(&self.data),
+            cursor: self.position(),
+            delimiters: self.delimiters.clone(),
+            eol_markers: self.eol_markers.clone()
+        }
+    }
+
     pub fn position(&self) -> usize {
         self.cursor
     }
@@ -416,9 +430,9 @@ mod tests {
         )
     }
 
-    fn get_reader(data: &Vec<u8>) -> PdfFileReader {
+    fn get_reader(data: Vec<u8>) -> PdfFileReader {
         PdfFileReader{
-            data: data.clone(),
+            data: Rc::new(data),
             cursor: 0,
             delimiters: PDF_DELIMITERS.iter().cloned().collect(),
             eol_markers: PDF_EOL_MARKERS.iter().cloned().collect(),
@@ -428,8 +442,9 @@ mod tests {
     #[test]
     fn test_seek() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
         let data_len = test_data.len();
+        let mut reader = get_reader(test_data.clone());
+
         assert_eq!(reader.position(), 0);
         for i in 0..(data_len + 1) {
             assert_eq!(reader.position(), i);
@@ -459,7 +474,7 @@ mod tests {
     #[test]
     fn test_read_n() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         assert_eq!(reader.read_n(14), &test_data[..14]);
         assert_eq!(reader.position(), 14);
         assert_eq!(reader.read_n(1), &test_data[14..]);
@@ -483,7 +498,7 @@ mod tests {
     #[test]
     fn test_peek_ahead_n() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         let data_len = test_data.len();
         assert_eq!(reader.position(), 0);
         for i in 0..(data_len + 1) {
@@ -503,7 +518,7 @@ mod tests {
     #[test]
     fn test_peek_behind_n() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         assert_eq!(reader.peek_behind_n(0), &[]);
         assert_eq!(reader.position(), 0);
         assert_eq!(reader.peek_behind_n(100), &[]);
@@ -529,7 +544,7 @@ mod tests {
     #[test]
     fn test_read_until_charset() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         let mut delimiter = HashSet::new();
 
         delimiter.insert(test_data[0]);
@@ -562,7 +577,7 @@ mod tests {
     #[test]
     fn test_read_in_charset() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         let mut charset: HashSet<u8> = (0..100).into_iter().collect();
         charset.remove(&test_data[0]);
         charset.remove(&test_data[10]);
@@ -589,7 +604,7 @@ mod tests {
     #[test]
     fn test_read_until_delimiters() {
         let test_data = get_test_data();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         assert_eq!(reader.read_until_delimiter(), &[]);
         assert_eq!(reader.position(), 0);
         assert_eq!(reader.read_until_delimiter(), &[]);
@@ -625,7 +640,7 @@ mod tests {
         let first_word = Vec::from("Aa..".to_string());
         let second_word = Vec::from("Bb..".to_string());
         let third_word = Vec::from("Cc..".to_string());
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         assert_eq!(reader.read_current_word(), &[]);
         assert_eq!(reader.position(), 0);
 
@@ -666,7 +681,7 @@ mod tests {
         let first_word = Vec::from("Aa..".to_string());
         let second_word = Vec::from("Bb..".to_string());
         let third_word = Vec::from("Cc..".to_string());
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
         assert_eq!(reader.read_next_word(), &first_word[..]);
         assert_eq!(reader.position(), 5);
 
@@ -704,7 +719,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -732,7 +747,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -761,7 +776,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -794,7 +809,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -828,7 +843,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -856,7 +871,7 @@ mod tests {
         let third_line = Vec::from("Dd.."); // starts at 17, ends at 21
         let fourth_line = Vec::from("Ee.."); // starts at 24, ends at 26
 
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -878,7 +893,7 @@ mod tests {
     #[test]
     fn test_step_to_end_of_prior_line() {
         let test_data = get_line_test();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -900,7 +915,7 @@ mod tests {
     #[test]
     fn test_step_to_start_of_next_line() {
         let test_data = get_line_test();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();
@@ -920,7 +935,7 @@ mod tests {
     #[test]
     fn test_step_to_start_of_current_line() {
         let test_data = get_line_test();
-        let mut reader = get_reader(&test_data);
+        let mut reader = get_reader(test_data.clone());
 
         for ix in 0..test_data.len() + 1 {
             reader.seek(SeekFrom::Start(ix as u64)).unwrap();

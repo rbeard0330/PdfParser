@@ -75,6 +75,14 @@ pub fn is_valid_ascii_85_byte(c: u8) -> bool {
     }
 }
 
+pub fn u8_slice_as_int(slice: &[u8]) -> u32 {
+    let mut acc = 0;
+    for d in slice {
+        acc = 256 * acc + *d as u32;
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

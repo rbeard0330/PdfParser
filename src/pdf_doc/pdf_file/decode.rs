@@ -1,3 +1,6 @@
+#[path = "predictors.rs"]
+mod predictors;
+
 use std::io::Read;
 use std::fmt::Display;
 
@@ -22,8 +25,8 @@ impl Display for PdfContentStream {
 
 #[derive(Debug)]
 pub struct PdfBinaryStream {
-    attributes: PdfMap,
-    data: Vec<u8>
+    pub attributes: PdfMap,
+    pub data: Vec<u8>
 }
 
 impl Display for PdfBinaryStream {
@@ -33,6 +36,7 @@ impl Display for PdfBinaryStream {
     }
 }
 
+#[derive(Debug, Clone)]
 enum Filter {
     ASCIIHex,
     ASCII85,
@@ -72,7 +76,14 @@ impl Filter {
         if data.is_err() {
             return Err(data.unwrap_err());
         };
-        if let Ok(ref v) = data {println!("input data:\nstart: {:?},\nend: {:?},\nlength: {}", &v[..5], &v[(v.len() - 5)..], &v.len());
+        
+        if let Ok(ref v) = data {
+            println!("Data length as vec: {}", v.len());
+            let data_string_start = v.iter().take(15).map(|n| *n as char).collect::<String>();
+            let data_string_end = v.iter().rev().take(15).map(|n| *n as char).collect::<Vec<_>>().iter().rev().collect::<String>();
+            println!("data start: {}\ndata end: {}", data_string_start, data_string_end);
+            
+
         };
         let data = data.unwrap();
         let output_data = match self {
@@ -167,18 +178,39 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
-        let mut decoder = flate2::read::ZlibDecoder::new(&*data);
+    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
+        let mut flate_decoder = flate2::read::ZlibDecoder::new(&*data);
         let mut output = Vec::new();
-        let decode_result = decoder.read_to_end(&mut output);
-        match decode_result {
-            Ok(_) => Ok(data),
+        let flate_result = flate_decoder.read_to_end(&mut output);
+        let decode_result = match params {
+            None => output,
+            Some(map) => _apply_predictors(map, output)?
+        };
+        match flate_result {
+            Ok(_) => Ok(decode_result),
             Err(e) => Err(ErrorKind::FilterError(
                 format!("Error applying flate filter: {:?}", e),
                 "apply:apply_flate",
             ))?,
         }
     }
+}
+
+fn _apply_predictors(shared_map: SharedObject, data: Vec<u8>) -> Result<Vec<u8>> {
+    let map = shared_map.try_into_map()?;
+    let algorithm = match map.get("Predictor") {
+        None => { return Ok(data) }, // Technically an error
+        Some(obj) => obj.try_into_int()?
+    };
+    use predictors::*;
+    let output_data = match algorithm {
+        12 => png_predictor(&data,
+                            map.get("Columns").unwrap().try_into_int()? as usize,
+                            Some(PngAlgorithm::Up)),
+        _ => data
+    };
+    Ok(output_data)
+
 }
 
 pub fn decode_stream(map: PdfMap, bytes: &[u8]) -> Result<PdfObject> {
@@ -192,6 +224,9 @@ pub fn decode_stream(map: PdfMap, bytes: &[u8]) -> Result<PdfObject> {
         .try_into_int()? as usize;
     assert_eq!(bytes.len(), expected_byte_length);
     println!("expected byte length: {}, actual: {}", expected_byte_length, bytes.len());
+    println!("first bytes {:?}", &bytes[..2]);
+    println!("last bytes: {:?}", &bytes[(expected_byte_length - 2)..]);
+    //std::fs::write("compressed_file.gz", bytes);
 
     // Classify stream
     let type_and_subtype = (map.get("Type"), map.get("Subtype"));
@@ -230,9 +265,21 @@ pub fn decode_stream(map: PdfMap, bytes: &[u8]) -> Result<PdfObject> {
                       }))
         })
         .collect::<Result<Vec<decode::Filter>>>()?;
-    let filtered_data = filter_array
+    println!("Filters to apply: {:?}", filter_array);
+    println!("Data length: {}", bytes.len());
+        let filtered_data = filter_array
         .into_iter()
         .fold(Ok(Vec::from(bytes)), |data, filter| filter.apply(data))?;
+    //let data_string: String = filtered_data.iter().map(|v| *v as char).collect();
+
+    // for i in 0..20 {
+    //     let s = &filtered_data[5*i..(5*i + 5)];
+    //     let ix:u64 = s[1] as u64 * 256 * 256 + s[2] as u64 * 256 + s[3] as u64;
+    //     println!("{} {} {}", s[0], ix, s[4]);
+    // }
+
+    println!("data length: {}", filtered_data.len());
+
 
     Ok(PdfObject::new_binary_stream(PdfBinaryStream{
         attributes: map, data: filtered_data}))
@@ -267,7 +314,39 @@ fn determine_stream_type(tup: (Option<&Rc<PdfObject>>, Option<&Rc<PdfObject>>)) 
         }
     };
     return Unknown
+}
+
+enum PngAlgorithm {
+    Sub,
+    Up,
+    Paeth,
+    None,
+    Average
+
+}
+
+fn png_predictor(data: &Vec<u8>, line_length: usize, expected_algorithm: Option<PngAlgorithm>) -> Vec<u8> {
+    let data_length = data.len();
+    println!("data length: {}, line length: {}", data_length, line_length);
+    assert_eq!(data_length % (line_length + 1), 0);
+    let lines = data_length / (line_length + 1);
     
+    let mut new_data = Vec::from(&data[1..(line_length + 1)]);
+    new_data.reserve(line_length * (lines - 1));
+    for line_ix in 1..lines {
+        let filter_byte = data[line_ix * line_length];
+        
+        for col_ix in 0..line_length {
+            let index = line_ix * (line_length + 1) + col_ix + 1;
+            let prior_line_index = (line_ix - 1) * line_length + col_ix;
+            let new_val = data[index] as u16 + new_data[prior_line_index] as u16;
+            new_data.push(new_val as u8);
+        }        
+    }
+    new_data
+
+
+
 }
 
 struct Ascii85Iterator {

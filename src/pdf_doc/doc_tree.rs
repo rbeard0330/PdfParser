@@ -111,7 +111,7 @@ impl PageTree {
     }
 
     fn add_node(&mut self, new_node: &PdfObject, target_index: Option<TreeIndex>) -> Result<()> {
-        println!("Adding {:?} to tree", new_node);
+        trace!("Adding {:?} to tree", new_node);
         let node_map = new_node.try_into_map()
                                .chain_err(|| ErrorKind::TestingError(
                                    format!("Expected dictionary, got {:?}", new_node))

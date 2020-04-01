@@ -1,7 +1,7 @@
 pub mod decode;
 mod util;
 mod file_reader;
-
+pub mod object_cache;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,66 +15,15 @@ use std::str;
 
 use crate::errors::*;
 use ErrorKind::*;
+pub use object_cache::{ObjectCache, ObjectLocation};
 
 pub use super::pdf_objects::*;
 use util::*;
 use file_reader::{PdfFileReader, PdfFileReaderInterface};
 
 pub trait ParserInterface<T: PdfObjectInterface> {
-    fn retrieve_object_by_ref(&self, id: u32, gen: u32) -> Result<Rc<T>>;
+    fn retrieve_object_by_ref(&self, id: ObjectId) -> Result<Rc<T>>;
     fn retrieve_trailer(&self) -> Result<&PdfObject>;
-}
-
-#[derive(Debug)]
-pub struct ObjectCache {
-    cache: RefCell<HashMap<ObjectId, Rc<PdfObject>>>,
-    index_map: RefCell<HashMap<ObjectId, usize>>,
-    reader: RefCell<PdfFileReader>,
-    self_ref: RefCell<Weak<Self>>
-}
-
-
-impl ObjectCache {
-    fn new(reader: PdfFileReader, index: HashMap<ObjectId, usize>, weak_ref: Weak<Self>) -> Self {
-        ObjectCache{
-            cache: RefCell::new(HashMap::new()),
-            index_map: RefCell::new(index),
-            reader: RefCell::new(reader),
-            self_ref: RefCell::new(weak_ref)
-        }
-    }
-    fn update_reference(&self, new_ref: Weak<Self>) {
-        self.self_ref.replace(new_ref);
-    }
-}
-
-impl ParserInterface<PdfObject> for ObjectCache {
-    fn retrieve_object_by_ref(&self, id: u32, gen: u32) -> Result<SharedObject> {
-        
-        println!("retrieving object# {}", id);
-        let key = ObjectId(id, gen);
-        let cache_results;
-        {
-            let map = self.cache.borrow_mut();
-            cache_results = map.get(&key).map(|r| Rc::clone(r));
-        } // Drop borrow of cache here, before potentially recursive call to parse_object_at
-
-        if let None = cache_results {
-            let new_obj = Rc::new(parse_object_at(
-                &mut self.reader.borrow_mut(),
-                *self.index_map.borrow().get(&key).ok_or(
-                    ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?,
-                &Weak::clone(&self.self_ref.borrow())
-                )?);
-            let mut map = self.cache.borrow_mut();  // Mutable borrow of map
-            map.insert(key, new_obj);
-        };  // Mutable borrow of map dropped here
-        Ok(Rc::clone(self.cache.borrow().get(&key).unwrap()))  // Immutable borrow of map
-
-    }
-    fn retrieve_trailer(&self) -> Result<&PdfObject> {
-        Err(ErrorKind::UnavailableType("trailer".to_string(), "retrieve_trailer".to_string()).into())
-    }
 }
 
 #[derive(Debug)]
@@ -89,8 +38,8 @@ enum XrefType {
 }
 
 impl ParserInterface<PdfObject> for Parser {
-    fn retrieve_object_by_ref(&self, id: u32, gen: u32) -> Result<SharedObject> {
-        self.object_map.retrieve_object_by_ref(id, gen)
+    fn retrieve_object_by_ref(&self, id: ObjectId) -> Result<SharedObject> {
+        self.object_map.retrieve_object_by_ref(id)
     }
     fn retrieve_trailer(&self) -> Result<&PdfObject> {
         match self.trailer {
@@ -116,23 +65,22 @@ impl Parser {
         };
         let (index, file_trailer) = match xref_type {
             XrefType::Standard =>  {
-                let xrefs = Parser::process_standard_xref_table(&mut pdf.object_map.reader.borrow_mut(), xref_start)?;
-                let trailer = Parser::get_standard_trailer(pdf.object_map.reader.borrow_mut(), &weak_ref)?;
+                let xrefs = Parser::process_standard_xref_table(pdf.object_map.reader(), xref_start)?;
+                let (trailer, _) = Parser::get_standard_trailer(pdf.object_map.reader(), &weak_ref)?;
                 (xrefs, Some(trailer))
             },
             XrefType::Stream => {
-                let (xrefs, trailer) = pdf.process_xref_stream(xref_start)?;
+                let (xrefs, trailer) = pdf.process_xref_stream(xref_start, &weak_ref)?;
                 (xrefs, Some(trailer))
             }
         };
         
         pdf.trailer = file_trailer;
-        *pdf.object_map.index_map.borrow_mut() = index;
+        pdf.object_map.update_index(index);
         Ok(pdf)
     }
 
-    fn find_xref_start_and_type<T> (mut reader: T) -> Result<(usize, XrefType)> where
-            T: DerefMut<Target = PdfFileReader> {
+    fn find_xref_start_and_type(reader: &mut PdfFileReader) -> Result<(usize, XrefType)> {
         reader.seek(SeekFrom::End(-1))?;
         assert_eq!(str::from_utf8(reader.peek_current_line()).expect("Internal error: line not ascii"), "%%EOF");
         let steps = reader.step_to_end_of_prior_line();
@@ -161,16 +109,15 @@ impl Parser {
     }
 
 
-    fn get_standard_trailer<T>(mut reader: T, weak_ref: &Weak<ObjectCache>)
-            -> Result<PdfObject> where 
-            T: DerefMut<Target = PdfFileReader> {
+    fn get_standard_trailer(mut reader: PdfFileReader, weak_ref: &Weak<ObjectCache>)
+            -> Result<(PdfObject, PdfFileReader)> {
         reader.seek(SeekFrom::End(-1)).unwrap();
         loop {
             let line = String::from_utf8_lossy(reader.peek_current_line()).trim().to_owned();
             if line == "trailer" {
                 reader.step_to_start_of_next_line();
                 let pos = reader.position();
-                return parse_object_at(&mut reader, pos, &Weak::clone(&weak_ref))
+                return parse_object_at(reader.spawn_clone(), pos, &Weak::clone(&weak_ref))
                         .chain_err(|| ParsingError("invalid trailer".to_string()))
             };
             if reader.position() == 0 {
@@ -180,9 +127,8 @@ impl Parser {
         }
     }
 
-    fn process_standard_xref_table<T>(mut reader: &mut T, start_index: usize)
-            -> Result<HashMap<ObjectId, usize>> where
-            T: DerefMut<Target = PdfFileReader> {
+    fn process_standard_xref_table(mut reader: PdfFileReader, start_index: usize)
+            -> Result<HashMap<ObjectId, ObjectLocation>> {
         reader.seek(SeekFrom::Start(start_index as u64))?;
         debug_assert_eq!(reader.read_current_line(), &[b'x', b'r', b'e', b'f']);
         let mut index_map = HashMap::new();
@@ -191,6 +137,7 @@ impl Parser {
         let mut objects_to_go = 0;
         loop {
             let line = String::from_utf8_lossy(reader.read_current_line()).trim().to_owned();
+            //println!("Reading line {}", line);
             
             if !(line.chars().last().unwrap() == 'n' || line.chars().last().unwrap() == 'f') {
                 if line == "trailer" {break};
@@ -227,7 +174,8 @@ impl Parser {
                                     ||ParsingError(format!("Non-integer as object identifier: {}", line_components[1]))
                                 )?;
             match line_components[2] {
-                "n" => { index_map.insert(ObjectId(obj_number, second_number), first_number); },
+                "n" => { index_map.insert(ObjectId(obj_number, second_number),
+                         ObjectLocation::Uncompressed(first_number)); },
                 "f" => free_objects.push(first_number),
                 _ => Err(ParsingError(format!("Could not resolve line-end: {}", line_components[2])))?
             };
@@ -238,25 +186,47 @@ impl Parser {
         Ok(index_map)
     }
 
-    fn process_xref_stream(&mut self, start_index: usize) -> Result<(HashMap<ObjectId, usize>, PdfObject)> {
+    fn process_xref_stream(&mut self, start_index: usize, weak_ref: &Weak<ObjectCache>)
+            -> Result<(HashMap<ObjectId, ObjectLocation>, PdfObject)> {
+        let (stream, _) = parse_object_at(self.object_map.reader(), start_index, weak_ref)?;
+        let map = stream.try_into_map().unwrap();
+        let v: Vec<_> = map.get("W")
+                             .ok_or(ParsingError(format!("Missing W entry in crossref stream")))?
+                             .try_into_array()?
+                             .iter()
+                             .map(|obj| obj.try_into_int().unwrap() as usize)
+                             .collect::<Vec<_>>();
+        let data = stream.try_into_binary()?;
+        let line_length = v[0] + v[1] + v[2];
+        assert_eq!(data.len() % line_length, 0);
+        let line_count = data.len() / line_length;
+        for line_ix in 0..line_count {
+            let line_start = line_ix * line_length as usize;
+            let field1 = u8_slice_as_int(&data[line_start..(line_start + v[0])]);
+            let field2 = u8_slice_as_int(&data[(line_start + v[0])..(line_start + v[0] + v[1])]);
+            let field3 = u8_slice_as_int(&data[(line_start + v[1])..(line_start + v[0] + v[2])]);
+        }
+
+
+
         Err(ParsingError(format!("Not implemented")))?
+
     }
 }
 
 
-fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<ObjectCache>) -> Result<PdfObject> where 
-    T: DerefMut<Target = PdfFileReader>
-         {
+fn parse_object_at(input_reader: PdfFileReader, start_index: usize, weak_ref: &Weak<ObjectCache>)
+        -> Result<(PdfObject, PdfFileReader)> {
     let mut state = ParserState::Neutral;
+    let mut reader = input_reader.spawn_clone();
     reader.seek(SeekFrom::Start(start_index as u64))
           .chain_err(|| ParsingError(format!("Index {} out of bounds", start_index)))?;
     let mut this_object_type = PDFComplexObject::Unknown;
-    let length = reader.len();
     let mut char_buffer = Vec::new();
     let mut object_buffer = Vec::new();
     loop {
-        let slice = reader.read_n(1); // Note: This advances the reader by 1, so current position is *after* c
-        if slice == &[] {
+        let slice = reader.read_and_copy_n(1); // This advances the reader by 1, so current position is *after* c
+        if slice.len() == 0 {
             return Err(ErrorKind::ParsingError(
                 "end of file while parsing object".to_string(),
             ))?;
@@ -270,13 +240,16 @@ fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<Ob
                     state
                 }
                 b'[' => {
-                    let new_array = parse_object_at(reader, reader.position() - 1, weak_ref)?;
+                    let pos = reader.position() - 1;
+                    //println!("Recursive call in array: {}", String::from_utf8_lossy(reader.peek_current_line()));
+                    let (new_array, returned_reader) = parse_object_at(reader, pos, weak_ref)?;
+                    reader = returned_reader;
                     object_buffer.push(new_array);
                     state
                 }
                 b']' => {
                     if this_object_type == PDFComplexObject::Array {
-                        return make_array_from_object_buffer(object_buffer);
+                        return Ok((make_array_from_object_buffer(object_buffer)?, reader));
                     } else {
                         return Err(ErrorKind::ParsingError(format!(
                             "Invalid terminator for {:?} at {}: ]\ncontext: {}",
@@ -289,7 +262,10 @@ fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<Ob
                         this_object_type = PDFComplexObject::Dict;
                         reader.seek(SeekFrom::Current(1)).unwrap();
                     } else {
-                        let new_dict = parse_object_at(reader, reader.position() - 1, weak_ref)?;
+                        let pos = reader.position() - 1;
+                        //println!("Recursive call in dict: {}", String::from_utf8_lossy(reader.peek_current_line()));
+                        let (new_dict, returned_reader) = parse_object_at(reader, pos, weak_ref)?;
+                        reader = returned_reader;
                         object_buffer.push(new_dict);
                     };
                     state
@@ -298,7 +274,7 @@ fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<Ob
                 b'>' if reader.peek_ahead_n(1) == &[b'>'] => {
                     if this_object_type == PDFComplexObject::Dict {
                         reader.seek(SeekFrom::Current(1)).unwrap();
-                        return make_dict_from_object_buffer(object_buffer);
+                        return Ok((make_dict_from_object_buffer(object_buffer)?, reader));
                     } else {
                         error!("-------Dictionary ended but I'm a {:?}", this_object_type);
                         error!("Buffer: {:#?}", object_buffer);
@@ -513,7 +489,7 @@ fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<Ob
                     match this_keyword {
                         PDFKeyword::EndObj => {
                             if this_object_type == PDFComplexObject::IndirectObj {
-                                return make_object_from_object_buffer(object_buffer);
+                                return Ok((make_object_from_object_buffer(object_buffer)?, reader));
                             } else {
                                 return Err(ErrorKind::ParsingError(format!(
                                     "Encountered endobj outside indirect object at {}\nContext: {}",
@@ -522,7 +498,7 @@ fn parse_object_at<T>(mut reader: &mut T, start_index: usize, weak_ref: &Weak<Ob
                             };
                         }
                         PDFKeyword::Stream => {
-                            return make_stream_object(object_buffer, &mut reader)
+                            return Ok((make_stream_object(object_buffer, &mut reader)?, reader))
                         }
                         PDFKeyword::Obj if this_object_type != PDFComplexObject::Unknown => {
                             Err(ErrorKind::ParsingError(format!(
@@ -580,17 +556,10 @@ fn make_stream_object(mut object_buffer: Vec<PdfObject>,reader: &mut PdfFileRead
             ))
         })?;
 
-    #[cfg(debug)]
-    {
-        let start_index = reader.position();
-        let current_line = reader.read_current_line();
-        assert!(current_line.len() >= 6);
-        assert_eq!(
-            String::from_utf8_lossy(current_line[current_line.len() - 6..]), "stream"
-        );
-        reader.seek(SeekFrom::Start(start_index)).unwrap();
-    }
+    println!("{:?}", reader.peek_current_line());
+    reader.seek(SeekFrom::Current(-3));
     reader.step_to_start_of_next_line();
+    println!("beginning read at position {}", reader.position());
     
     trace!("Stream dict: {:#?}", stream_dict);
     let id_number = object_buffer[0]
@@ -609,11 +578,12 @@ fn make_stream_object(mut object_buffer: Vec<PdfObject>,reader: &mut PdfFileRead
         .try_into_int()
         .chain_err(|| ErrorKind::ParsingError("Invalid gen number".to_string()))?
         as usize;
-    
+
     let binary_data = Vec::from(reader.read_n(binary_length));
     if binary_data.len() != binary_length {
         Err(ParsingError(format!("Encountered EOF before reading {} bytes", binary_length)))?
     };
+    println!("{:#?}", stream_dict);
     #[cfg(debug)]
     {
         let start_index = reader.position();
@@ -836,14 +806,13 @@ mod tests {
     }
 
     fn add_all_objects(pdf: &mut Parser) -> Result<()> {
-        let objects_to_add: Vec<(ObjectId, usize)> =
-            pdf.object_map.as_ref().index_map.borrow().iter().map(|(a, b)| (*a, *b)).collect();
-        for (object_number, _index) in objects_to_add {
+        let objects_to_add: Vec<ObjectId> = pdf.object_map.get_object_list();
+        for object_number in objects_to_add {
             println!("Retrieving Obj #{}:", object_number);
-            match pdf.retrieve_object_by_ref(object_number.0, object_number.1) {
-                Ok(obj) => { println!("Obj #{} successfully retrieved: {}", object_number, obj); },
+            match pdf.retrieve_object_by_ref(object_number) {
+                Ok(obj) => {},// println!("Obj #{} successfully retrieved: {}", object_number, obj); },
                 Err(e) => {
-                    println!("**Obj #{} ERROR**: {}", object_number, e);
+                    //println!("**Obj #{} ERROR**: {}", object_number, e);
                     Err(e.chain_err(|| ErrorKind::TestingError(format!("**Obj #{} ERROR**", object_number))))?;
                 }
             };

@@ -52,7 +52,9 @@ use errors::*;
 fn main() {
     pretty_env_logger::init_timed();
     error!("Oh no!");
-    let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
-    //let mut pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/treatise.pdf").unwrap();
+    //let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
+    let mut pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/treatise.pdf").unwrap();
     println!("{}", pdf_doc);
 }
+
+
