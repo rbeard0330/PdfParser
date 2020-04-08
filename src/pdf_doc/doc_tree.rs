@@ -11,7 +11,6 @@ use crate::errors::*;
 use vec_tree::VecTree;
 
 pub use pdf_file::*;
-use pdf_objects::*;
 
 type TreeIndex = vec_tree::Index;
 struct DocTree {}
@@ -24,7 +23,7 @@ pub struct PdfDoc {
 }
 
 //TODO: Reimplement here
-fn get_version(bytes: &Vec<u8>) -> Result<PDFVersion> {
+pub fn get_version(bytes: &Vec<u8>) -> Result<PDFVersion> {
     let intro = String::from_utf8(
         bytes[..12]
             .iter()
@@ -75,6 +74,12 @@ struct Node {
     attributes: HashMap<String, SharedObject>,
 }
 
+impl Node {
+    pub fn get(&self, key: &str) -> Option<SharedObject> {
+        self.attributes.get(key).map(|obj| Rc::clone(obj))
+    }
+}
+
 
 #[derive(Debug, Clone, Copy)]
 enum NodeType {
@@ -111,7 +116,7 @@ impl PageTree {
     }
 
     fn add_node(&mut self, new_node: &PdfObject, target_index: Option<TreeIndex>) -> Result<()> {
-        trace!("Adding {:?} to tree", new_node);
+        println!("Adding {:?} to tree", new_node);
         let node_map = new_node.try_into_map()
                                .chain_err(|| ErrorKind::TestingError(
                                    format!("Expected dictionary, got {:?}", new_node))
@@ -163,6 +168,27 @@ impl PageTree {
             "Page" => Ok(Page),
             "Catalog" => Ok(Root),
             _ => Ok(NotImplemented)
+        }
+    }
+
+    fn root(&self) -> Option<&Node> {
+        let root_index = self.tree.get_root_index();
+        match root_index {
+            None => None,
+            Some(ix) => Some(&self.tree[ix])
+        }
+
+    }
+
+    fn page_count(&self) -> Result<usize> {
+        match self.root() {
+            None => Ok(0),
+            Some(node) => {
+                match node.get("Count") {
+                    None => Ok(0),
+                    Some(obj) => Ok(obj.try_into_int()? as usize)
+                }
+            }
         }
     }
 }
@@ -218,6 +244,7 @@ mod tests {
         data.insert("data/CCI01212020.pdf", PDFVersion::V1_3);
         data.insert("data/document.pdf", PDFVersion::V1_4);
         data.insert("data/2018W2.pdf", PDFVersion::V1_4);
+        data.insert("data/f1120.pdf", PDFVersion::V1_7);
         data
     }
 
@@ -225,16 +252,19 @@ mod tests {
     fn object_imports() {
         let test_pdfs = test_data();
         // TODO: Add version checks too
+        let mut had_errors = false;
         for (path, _version) in test_pdfs {
+            
             let pdf = Parser::create_pdf_from_file(path);
-            let pdf = match pdf {
-                Ok(val) => val,
+            match pdf {
+                Ok(_val) => {},
                 Err(e) => {
-                    println!("{:?}", e);
-                    panic!();
+                    error!("Error processing {}: {:?}", path, e);
+                    had_errors = true;
                 }
             };
-        }
+        };
+        if had_errors { panic!() };
     }
 
     #[test]

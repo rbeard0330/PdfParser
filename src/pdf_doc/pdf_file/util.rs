@@ -1,13 +1,5 @@
-use std::convert::TryInto;
-
 use crate::errors::*;
 
-pub fn peek_ahead_by_n(bytes: &Vec<u8>, index: usize, n: usize) -> Option<u8> {
-    if index + n >= bytes.len() {
-        return None;
-    };
-    return Some(bytes[index + n]);
-}
 
 pub fn is_octal(c: u8) -> bool {
     b'0' <= c && c <= b'7'
@@ -80,6 +72,7 @@ pub fn u8_slice_as_int(slice: &[u8]) -> u32 {
     for d in slice {
         acc = 256 * acc + *d as u32;
     }
+    //println!("slice: {:?}, acc: {}", slice, acc);
     acc
 }
 

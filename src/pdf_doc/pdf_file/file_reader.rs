@@ -24,6 +24,7 @@ pub struct PdfFileReader {
 pub trait PdfFileReaderInterface: Index<Range<usize>> + Sized {
     /// Return a new reader over the provided file. The reader will read the entire file into memory.
     fn new(path: &str) -> Result<Self>;
+    fn new_from_vec(data: Vec<u8>) -> Result<Self>;
 
     /// Advance the current position by n and return the data (including current position and excluding end position) as a &str.  Any invalid ASCII characters are an error.
     fn read_n(&mut self, n: usize) -> &[u8];
@@ -124,6 +125,14 @@ impl PdfFileReaderInterface for PdfFileReader {
     fn new(path: &str) -> Result<Self> {
         Ok(PdfFileReader{
             data: Rc::new(std::fs::read(path)?),
+            cursor: 0,
+            delimiters: PDF_DELIMITERS.iter().cloned().collect(),
+            eol_markers: PDF_EOL_MARKERS.iter().cloned().collect(),
+        })
+    }
+    fn new_from_vec(data: Vec<u8>) -> Result<Self> {
+        Ok(PdfFileReader{
+            data: Rc::new(data),
             cursor: 0,
             delimiters: PDF_DELIMITERS.iter().cloned().collect(),
             eol_markers: PDF_EOL_MARKERS.iter().cloned().collect(),
