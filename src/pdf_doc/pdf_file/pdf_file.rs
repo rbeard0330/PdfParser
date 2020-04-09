@@ -18,6 +18,7 @@ pub use super::pdf_objects::*;
 use util::*;
 use file_reader::{PdfFileReader, PdfFileReaderInterface};
 
+
 pub trait ParserInterface<T: PdfObjectInterface> {
     fn retrieve_object_by_ref(&self, id: ObjectId) -> Result<Rc<T>>;
     fn retrieve_trailer(&self) -> Result<&PdfObject>;
@@ -28,6 +29,8 @@ pub struct Parser {
     trailer: Option<PdfObject>,
     pub object_map: Rc<ObjectCache>,
 }
+
+type XrefMap = HashMap<ObjectId, ObjectLocation>;
 
 enum XrefType {
     Standard,
@@ -50,7 +53,6 @@ impl Parser {
     pub fn create_pdf_from_file(path: &str) -> Result<Self> {
         //TODO: Fix the index
         let mut reader = PdfFileReader::new(path)?;
-        let (xref_start, xref_type) = Parser::find_xref_start_and_type(&mut reader)?;
 
         let null_ref = Weak::new();
         let cache_ref = Rc::new(ObjectCache::new(reader, HashMap::new(), null_ref.clone()));
@@ -60,6 +62,8 @@ impl Parser {
             trailer: None,
             object_map: cache_ref,
         };
+
+        let (xref_start, xref_type) = Parser::find_xref_start_and_type(pdf.object_map.reader())?;
         let (index, file_trailer) = match xref_type {
             XrefType::Standard =>  {
                 let xrefs = Parser::process_standard_xref_table(pdf.object_map.reader(), xref_start)?;
@@ -71,14 +75,14 @@ impl Parser {
                 (xrefs, Some(trailer))
             }
         };
-        println!("{:?}", index);
+        //println!("{:#?}", index);
         
         pdf.trailer = file_trailer;
         pdf.object_map.update_index(index);
         Ok(pdf)
     }
 
-    fn find_xref_start_and_type(reader: &mut PdfFileReader) -> Result<(usize, XrefType)> {
+    fn find_xref_start_and_type(mut reader: PdfFileReader) -> Result<(usize, XrefType)> {
         reader.seek(SeekFrom::End(-1))?;
         assert_eq!(str::from_utf8(reader.peek_current_line()).expect("Internal error: line not ascii"), "%%EOF");
         let steps = reader.step_to_end_of_prior_line();
@@ -92,20 +96,19 @@ impl Parser {
         assert_eq!(str::from_utf8(reader.peek_current_line()).expect("Internal error: line not ascii"), "startxref");
         reader.seek(SeekFrom::Start(xref_start as u64))?;
         match reader.peek_current_line() {
-            &[b'x', b'r', b'e', b'f'] => Ok((xref_start, XrefType::Standard)),
+            b"xref" => Ok((xref_start, XrefType::Standard)),
             line @ _ => {
                 let slice_length = line.len();
                 if slice_length < 7 {
                     Err(ErrorKind::ParsingError(format!("No valid xref table at {}: {:?}", xref_start, line)))?
                 };
-                match line[(slice_length - 3)..] {
-                    [b'o', b'b', b'j'] => return Ok((xref_start, XrefType::Stream)),
+                match &line[(slice_length - 3)..] {
+                    b"obj" => return Ok((xref_start, XrefType::Stream)),
                     _ => Err(ErrorKind::ParsingError(format!("No valid xref table at {}: {:?}", xref_start, line)))?
                 }
             }
         }
     }
-
 
     fn get_standard_trailer(mut reader: PdfFileReader, weak_ref: &Weak<ObjectCache>)
             -> Result<(PdfObject, PdfFileReader)> {
@@ -125,8 +128,7 @@ impl Parser {
         }
     }
 
-    fn process_standard_xref_table(mut reader: PdfFileReader, start_index: usize)
-            -> Result<HashMap<ObjectId, ObjectLocation>> {
+    fn process_standard_xref_table(mut reader: PdfFileReader, start_index: usize) -> Result<XrefMap> {
         reader.seek(SeekFrom::Start(start_index as u64))?;
         debug_assert_eq!(reader.read_current_line(), &[b'x', b'r', b'e', b'f']);
         let mut index_map = HashMap::new();
@@ -185,7 +187,7 @@ impl Parser {
     }
 
     fn process_xref_stream(&mut self, start_index: usize, weak_ref: &Weak<ObjectCache>)
-            -> Result<(HashMap<ObjectId, ObjectLocation>, PdfObject)> {
+            -> Result<(XrefMap, PdfObject)> {
         let (stream, _) = parse_uncompressed_object_at(self.object_map.reader(), start_index, weak_ref)?;
         let map = stream.try_into_map().unwrap();
         let v: Vec<_> = map.get("W")
@@ -195,7 +197,7 @@ impl Parser {
                              .map(|obj| obj.try_into_int().unwrap() as usize)
                              .collect::<Vec<_>>();
         let data = stream.try_into_binary()?;
-        println!("data: {:?}", data);
+        //println!("data: {:?}", data);
         let line_length = v[0] + v[1] + v[2];
         assert_eq!(data.len() % line_length, 0);
         let line_count = data.len() / line_length;
@@ -220,6 +222,12 @@ impl Parser {
         }
         //println!("index: {:?}", index);
         Ok((index, stream))
+    }
+
+    fn merge_previous(reader: PdfFileReader, index: usize, xrefs: XrefMap) -> Result<XrefMap> {
+        
+        
+        Err(ParsingError(format!("Unsupported type fiel")))?
 
     }
 }
@@ -814,9 +822,10 @@ mod tests {
 
     const TEST_PDFS: [&str; 4] = [
         "data/simple_pdf.pdf",
-        "data/CCI01212020.pdf",
-        "data/document.pdf",
-        "data/2018W2.pdf",
+        "data/f1120.pdf",
+        //"data/PDF32000_2008.pdf",
+        "data/who.pdf",
+        "data/treatise.pdf",
     ];
 
     #[test]

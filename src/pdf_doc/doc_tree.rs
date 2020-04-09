@@ -8,6 +8,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::errors::*;
+use ErrorKind::*;
 use vec_tree::VecTree;
 
 pub use pdf_file::*;
@@ -20,6 +21,19 @@ pub struct PdfDoc {
     file: Parser,
     page_tree: PageTree,
     root: SharedObject,
+}
+
+impl PdfDoc {
+    pub fn pages(&self) -> Pages {
+        Pages {
+            page_count: self.page_tree.page_count().unwrap_or_default(),
+            tree: &self.page_tree,
+            current_page: 0
+        }
+    }
+    pub fn page_count(&self) -> usize {
+        self.page_tree.page_count().unwrap()
+    }
 }
 
 //TODO: Reimplement here
@@ -78,6 +92,12 @@ impl Node {
     pub fn get(&self, key: &str) -> Option<SharedObject> {
         self.attributes.get(key).map(|obj| Rc::clone(obj))
     }
+    pub fn is_page(&self) -> bool {
+        match self.node_type {
+            NodeType::Page => true,
+            _ => false
+        }
+    }
 }
 
 
@@ -116,7 +136,7 @@ impl PageTree {
     }
 
     fn add_node(&mut self, new_node: &PdfObject, target_index: Option<TreeIndex>) -> Result<()> {
-        println!("Adding {:?} to tree", new_node);
+        //println!("Adding {:?} to tree", new_node);
         let node_map = new_node.try_into_map()
                                .chain_err(|| ErrorKind::TestingError(
                                    format!("Expected dictionary, got {:?}", new_node))
@@ -182,15 +202,51 @@ impl PageTree {
 
     fn page_count(&self) -> Result<usize> {
         match self.root() {
-            None => Ok(0),
+            None => Err(ParsingError(format!("No root !")))?,
             Some(node) => {
                 match node.get("Count") {
-                    None => Ok(0),
+                    None => Err(ParsingError(format!("No /Count entry in root!")))?,
                     Some(obj) => Ok(obj.try_into_int()? as usize)
                 }
             }
         }
     }
+    
+    pub fn get_page(&self, page_number: usize) -> Option<&Node> {
+        if page_number > self.page_count().ok()? { return None };
+        let mut current_node = self.tree.get_root_index()?;
+        let mut pages_passed = 0;
+        loop {
+            let starting_node = current_node;
+            for child in self.tree.children(current_node) {
+                let this_child = &self.tree[child];
+                //println!("Current node: {}", this_child);
+                if this_child.is_page() {
+                    if pages_passed == page_number - 1 {
+                        return Some(this_child)
+                    };
+                    pages_passed += 1;
+                    continue
+                }
+                let this_child_pages = this_child
+                    .get("Count")
+                    .map(
+                        |obj| obj.try_into_int().unwrap_or(0)
+                    )
+                    .unwrap_or(0) as usize;
+                let next_pages = pages_passed + this_child_pages;
+                if next_pages >= page_number {
+                    current_node = child;
+                    break
+                } else {
+                    pages_passed = next_pages;
+                }
+            }
+            if starting_node == current_node { return None };
+        }
+    }
+
+
 }
 
 
@@ -210,6 +266,20 @@ impl fmt::Display for PageTree {
     }
 }
 
+struct Pages<'a> {
+    page_count: usize,
+    tree: &'a PageTree,
+    current_page: usize
+}
+
+impl<'a> Iterator for Pages<'a> {
+    type Item = &'a Node;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current_page += 1;
+        self.tree.get_page(self.current_page)
+    }
+}
+
 impl PdfDoc {
     pub fn create_pdf_from_file(path: &str) -> Result<Self> {
         let file = Parser::create_pdf_from_file(path)?;
@@ -217,9 +287,13 @@ impl PdfDoc {
                                .try_into_map()
                                .unwrap();
         let root = trailer_dict.get("Root").ok_or(ErrorKind::ParsingError("Root not present in trailer!".to_string()))?;
+        let root_dict = root.try_into_map()
+                .chain_err(|| ErrorKind::ParsingError("Root not a dictionary!".to_string()))?;
+        let pages_root = root_dict.get("Pages")
+                .ok_or(ErrorKind::ParsingError("Pages not present in root!".to_string()))?;
         let pdf = PdfDoc {
             file: file,
-            page_tree: PageTree::new(&root)?,
+            page_tree: PageTree::new(pages_root)?,
             root: Rc::clone(root),
         };
         Ok(pdf)
@@ -241,10 +315,10 @@ mod tests {
     fn test_data() -> HashMap<&'static str, PDFVersion> {
         let mut data = HashMap::new();
         data.insert("data/simple_pdf.pdf", PDFVersion::V1_7);
-        data.insert("data/CCI01212020.pdf", PDFVersion::V1_3);
-        data.insert("data/document.pdf", PDFVersion::V1_4);
-        data.insert("data/2018W2.pdf", PDFVersion::V1_4);
         data.insert("data/f1120.pdf", PDFVersion::V1_7);
+        data.insert("data/PDF32000_2008.pdf", PDFVersion::V1_6);
+        //data.insert("data/who.pdf", PDFVersion::V1_7);
+        data.insert("data/treatise.pdf", PDFVersion::V1_6);
         data
     }
 
@@ -273,6 +347,32 @@ mod tests {
         for (path, _version) in test_pdfs {
             println!("{}", path);
             PdfDoc::create_pdf_from_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn page_iter() {
+        let test_pdfs = test_data();
+        for (path, _version) in test_pdfs {
+            println!("{}", path);
+            let doc = PdfDoc::create_pdf_from_file(path).unwrap();
+            println!("Root: {}", doc.page_tree.root().unwrap());
+            println!("Page count: {:?}", doc.page_count());
+            let mut counter = 0;
+            for (page_num, page) in doc.pages().enumerate() {
+                println!("Page {}: {}", page_num + 1, page);
+                counter += 1;
+            }
+            assert_eq!(doc.page_count(), counter);
+        }
+    }
+
+    #[test]
+    fn get_page() {
+        let doc = PdfDoc::create_pdf_from_file("data/PDF32000_2008.pdf").unwrap();
+        let page_count = 756;
+        for page in 1..page_count {
+            println!("Page {}: {}", page, doc.page_tree.get_page(page).unwrap());
         }
     }
 }

@@ -1,6 +1,6 @@
 pub fn png_up(data: &Vec<u8>, line_length: usize) -> Vec<u8> {
     let data_length = data.len();
-    println!("data length: {}, line length: {}", data_length, line_length);
+    //println!("data length: {}, line length: {}", data_length, line_length);
     //assert_eq!(data_length % line_length, 0);
     // copy first line
     let mut new_data = Vec::from(&data[..line_length]);

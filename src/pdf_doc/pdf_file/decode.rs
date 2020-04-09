@@ -87,14 +87,12 @@ impl Filter {
             return Err(data.unwrap_err());
         };
         
-        // if let Ok(ref v) = data {
-        //     println!("Data length as vec: {}", v.len());
-        //     let data_string_start = v.iter().take(15).map(|n| *n as char).collect::<String>();
-        //     let data_string_end = v.iter().rev().take(15).map(|n| *n as char).collect::<Vec<_>>().iter().rev().collect::<String>();
-        //     println!("data start: {}\ndata end: {}", data_string_start, data_string_end);
+        if let Ok(ref v) = data {
+            //println!("Data length as vec: {}", v.len());
+            //println!("data start: {:?}\ndata end: {:?}", &v[..10], &v[(v.len() - 10)..]);
             
 
-        // };
+        };
         let data = data.unwrap();
         let output_data = match self {
             ASCIIHex => Filter::apply_ascii_hex(data),
@@ -186,14 +184,34 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_lzw(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
+    fn apply_lzw(mut data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
-        let mut flate_decoder = flate2::read::ZlibDecoder::new(&*data);
+    fn apply_flate(mut data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
+        let mut zlib_decoder = flate2::read::ZlibDecoder::new(&*data);
         let mut output = Vec::new();
-        let flate_result = flate_decoder.read_to_end(&mut output);
+        let mut flate_result = zlib_decoder.read_to_end(&mut output);
+        if flate_result.is_err() {
+            println!("retrying");
+            let mut flate_decoder = flate2::read::DeflateDecoder::new(&*data);
+            output.clear();
+            flate_result = flate_decoder.read_to_end(&mut output);
+        }
+        if flate_result.is_err() {
+            println!("retrying again");
+            let mut gz_decoder = flate2::read::GzDecoder::new(&*data);
+            output.clear();
+            flate_result = gz_decoder.read_to_end(&mut output);
+        }
+        if flate_result.is_err() {
+            println!("retrying again");
+            data.insert(0, 218);
+            data.insert(0, 120);
+            let mut zlib_decoder = flate2::read::ZlibDecoder::new(&*data);
+            output.clear();
+            flate_result = zlib_decoder.read_to_end(&mut output);
+        }
         let decode_result = match params {
             None => output,
             Some(map) => _apply_predictors(map, output)?
@@ -458,7 +476,5 @@ mod tests {
 
     #[test]
     fn flate_example() {
-        let _pdf_file = Parser::create_pdf_from_file("data/document.pdf").unwrap();
-        //TODO: Example
     }
 }
