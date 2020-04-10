@@ -10,7 +10,7 @@ pub fn is_octal(c: u8) -> bool {
 }
 
 pub fn is_whitespace(c: u8) -> bool {
-    c == 0 || c == 9 || c == 12 || c == 32 || is_EOL(c)
+    c == 0 || c == 9 || c == 12 || c == 32 || is_eol(c)
 }
 
 pub fn is_delimiter(c: u8) -> bool {
@@ -24,13 +24,13 @@ pub fn is_hex(c: u8) -> bool {
     (b'0' <= c && c <= b'9') || (b'A' <= c && c <= b'F')
 }
 
-pub fn is_EOL(c: u8) -> bool {
+pub fn is_eol(c: u8) -> bool {
     c == b'\n' || c == b'\r'
 }
 
-pub fn is_letter(c: u8) -> bool {
-    (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
-}
+// pub fn is_letter(c: u8) -> bool {
+//     (b'a' <= c && c <= b'z') || (b'A' <= c || c <= b'Z')
+// }
 
 pub fn is_body_keyword_letter(c: u8) -> bool {
     match c {

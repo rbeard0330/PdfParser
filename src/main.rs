@@ -1,9 +1,13 @@
 #![recursion_limit = "1024"]
-#[path = "pdf_doc/pdf_doc.rs"]
-mod pdf_doc;
+#[path = "pdf_doc/doc_tree.rs"]
+mod doc_tree;
 
 #[macro_use]
 extern crate error_chain;
+
+extern crate pretty_env_logger;
+#[macro_use]
+extern crate log;
 
 mod errors {
     error_chain! {
@@ -11,6 +15,8 @@ mod errors {
         foreign_links {
             Fmt(::std::fmt::Error);
             Io(::std::io::Error);
+            ParseFloat(::std::num::ParseFloatError);
+            ParseInt(::std::num::ParseIntError);
         }
         errors {
             UnavailableType(req: String, thrower: String) {
@@ -25,12 +31,28 @@ mod errors {
                 description("Error parsing PDF file")
                 display("{}", problem)
             }
-            FileError
-            ReferenceError
+            ReferenceError(problem: String) {
+                description("Bad reference")
+                display("{}", problem)
+            }
+            TestingError(text: String) {
+                description("Custom error")
+                display("{}", text)
+            }
+            DocTreeError(text: String) {
+                description("Doc tree error")
+                display("{}", text)
+            }
         }
     }
 }
 
 use errors::*;
 
-fn main() {}
+fn main() {
+    pretty_env_logger::init_timed();
+    error!("Oh no!");
+    let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
+    //let mut pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/treatise.pdf").unwrap();
+    println!("{}", pdf_doc);
+}

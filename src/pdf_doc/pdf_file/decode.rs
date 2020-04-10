@@ -1,11 +1,39 @@
 use std::io::Read;
+use std::fmt::Display;
 
 use flate2;
 
 use super::*;
 use crate::errors::*;
+use crate::doc_tree::pdf_objects::PdfObjectInterface;
 
-pub enum Filter {
+#[derive(Debug)]
+pub struct PdfContentStream {
+    attributes: PdfMap,
+    data: String
+}
+
+impl Display for PdfContentStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Attributes: {:#?}, Content: {}", self.attributes, self.data)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct PdfBinaryStream {
+    attributes: PdfMap,
+    data: Vec<u8>
+}
+
+impl Display for PdfBinaryStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Attributes: {:#?}, Content length: {}", self.attributes, self.data.len())?;
+        Ok(())
+    }
+}
+
+enum Filter {
     ASCIIHex,
     ASCII85,
     LZW(Option<SharedObject>),
@@ -44,17 +72,20 @@ impl Filter {
         if data.is_err() {
             return Err(data.unwrap_err());
         };
+        if let Ok(ref v) = data {println!("input data:\nstart: {:?},\nend: {:?},\nlength: {}", &v[..5], &v[(v.len() - 5)..], &v.len());
+        };
         let data = data.unwrap();
         let output_data = match self {
             ASCIIHex => Filter::apply_ascii_hex(data),
             ASCII85 => Filter::apply_ascii_85(data),
-            LZW(params) => Filter::apply_LZW(data, params),
+            LZW(params) => Filter::apply_lzw(data, params),
             Flate(params) => Filter::apply_flate(data, params),
             _ => Err(ErrorKind::FilterError(
                 format!("Unsupported filter: {}", self),
                 "Filter.apply",
             ))?,
         };
+        println!("output data_success: {:?}", !output_data.is_err());
         output_data
     }
 
@@ -100,11 +131,10 @@ impl Filter {
 
     fn _parse_ascii_85_group(arr: [Option<u8>; 5]) -> Result<Vec<u8>> {
         let mut base_256_value: u32 = 0;
-        let vec: Vec<u8> = arr
-            .into_iter()
-            .filter(|c| c.is_some())
-            .map(|c| c.unwrap())
-            .collect();
+        let vec: Vec<u8> = arr.iter()
+                              .filter(|c| c.is_some())
+                              .map(|c| c.unwrap())
+                              .collect();
         for &c in &vec {
             if !is_valid_ascii_85_byte(c) {
                 return Err(ErrorKind::FilterError(
@@ -133,12 +163,12 @@ impl Filter {
         Ok(data)
     }
 
-    fn apply_LZW(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
+    fn apply_lzw(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
         Ok(data)
     }
 
-    fn apply_flate(data: Vec<u8>, params: Option<SharedObject>) -> Result<Vec<u8>> {
-        let mut decoder = flate2::read::DeflateDecoder::new(&*data);
+    fn apply_flate(data: Vec<u8>, _params: Option<SharedObject>) -> Result<Vec<u8>> {
+        let mut decoder = flate2::read::ZlibDecoder::new(&*data);
         let mut output = Vec::new();
         let decode_result = decoder.read_to_end(&mut output);
         match decode_result {
@@ -151,71 +181,66 @@ impl Filter {
     }
 }
 
-pub fn decode_stream(map: &PdfMap, bytes: &Vec<u8>) -> Result<PdfObject> {
+pub fn decode_stream(map: PdfMap, bytes: Vec<u8>) -> Result<PdfObject> {
     //Check size
-    let expected_byte_length = map.get("Length")
-                                .ok_or(ErrorKind::ParsingError(
-                                    format!("Missing Length in {:?}", map)))?
-                                .try_into_int()? as usize;
+    let expected_byte_length = map
+        .get("Length")
+        .ok_or(ErrorKind::ParsingError(format!(
+            "Missing Length in {:?}",
+            map
+        )))?
+        .try_into_int()? as usize;
     assert_eq!(bytes.len(), expected_byte_length);
+    println!("expected byte length: {}, actual: {}", expected_byte_length, bytes.len());
 
     // Classify stream
     let type_and_subtype = (map.get("Type"), map.get("Subtype"));
     let stream_type = determine_stream_type(type_and_subtype);
     if let StreamType::Image = stream_type {
-        return Ok(Rc::new(DecodedStream {
-            stream_type: StreamType::Image,
-        }));
+        return Ok(PdfObject::new_binary_stream(PdfBinaryStream{
+            attributes: map,
+            data: bytes}))
     };
 
     //Extract filters
-    let filters = map.get("Filter").unwrap_or(Rc::new(Array(Vec::new())));
-    let params = map.get("DecodeParms").ok();
-    let filter_string_array = match &*filters {
-        &Name(ref s) => vec![Ok(s.clone())],
-        Array(ref v) => v
-            .iter()
-            .map(|item| match **item {
-                PDFObj::Name(ref s) => Ok(s.clone()),
-                _ => Err(PDFError {
-                    message: format!("Non-name item in Filter array: {:?}", item),
-                    function: "decode_stream",
-                }),
-            })
-            .collect(),
-        item => Err(ErrorKind::FilterError(
-            format!("Non-name item in Filter array: {:?}", item),
+    let params = map.get("DecodeParms");
+    let filter_object_array = match map.get("Filter") {
+        None => Vec::new(),
+        Some(obj) if obj.is_string() => vec![Rc::new(obj.as_ref().clone())],
+        Some(obj) if obj.is_array() => (*obj.try_into_array().unwrap()).to_owned(),
+        Some(obj) => Err(ErrorKind::FilterError(
+            format!("Non-name item in Filter array: {:?}", obj),
             "decode stream",
         ))?,
     }
     .into_iter()
-    .collect::<Result<Vec<String>, _>>()?;
-    let filter_array = filter_string_array
+    .collect::<Vec<SharedObject>>();
+    let filter_array = filter_object_array
         .into_iter()
         .enumerate()
         // Collect matching params without throwing error if no filters need params
         .map(|(index, s)| {
             filter_from_string_and_params(
-                &s,
-                params.as_ref().map(|arr| match **arr {
-                    Array(_) => arr.index(index).unwrap(),
-                    _ => Rc::clone(arr),
-                }),
-            )
+                s.try_into_string()?.as_ref(),
+                params.as_ref()
+                      .map(|arr| {
+                          if arr.is_array() {
+                              arr.try_to_index(index).unwrap()
+                            } else {Rc::clone(arr)}
+                      }))
         })
-        .collect::<Result<Vec<decode::Filter>, _>>()?;
-    let object = filter_array
+        .collect::<Result<Vec<decode::Filter>>>()?;
+    let filtered_data = filter_array
         .into_iter()
         .fold(Ok(bytes.clone()), |data, filter| filter.apply(data))?;
 
-    Ok(Rc::new(DecodedStream {
-        stream_type: StreamType::Image,
-    }))
+    Ok(PdfObject::new_binary_stream(PdfBinaryStream{
+        attributes: map, data: filtered_data}))
 }
 
-fn filter_from_string_and_params(name: &str, params: Option<PdfObject>) -> Result<Filter> {
+fn filter_from_string_and_params<T: AsRef<str> + Display>(name: T, params: Option<Rc<PdfObject>>) -> Result<Filter> {
     use Filter::*;
-    match name {
+    match name.as_ref() {
         "ASCIIHexDecode" => Ok(ASCIIHex),
         "ASCII85Decode" => Ok(ASCII85),
         "JPXDecode" => Ok(JPX),
@@ -233,15 +258,16 @@ fn filter_from_string_and_params(name: &str, params: Option<PdfObject>) -> Resul
     }
 }
 
-fn determine_stream_type(tup: (PDFResult, PDFResult)) -> StreamType {
+fn determine_stream_type(tup: (Option<&Rc<PdfObject>>, Option<&Rc<PdfObject>>)) -> StreamType {
     use StreamType::*;
-    if let Ok(result) = tup.1 {
-        match *result {
-            Name(ref s) if s == "Image" => return Image,
+    if let Some(object) = tup.1 {
+        match object.try_into_string() {
+            Ok(s) if *s == "Image" => return Image,
             _ => {}
-        };
-    }
-    return Unknown;
+        }
+    };
+    return Unknown
+    
 }
 
 struct Ascii85Iterator {
@@ -315,7 +341,7 @@ mod tests {
 
     #[test]
     fn flate_example() {
-        let mut pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
+        let _pdf_file = PdfFileHandler::create_pdf_from_file("data/document.pdf").unwrap();
         //TODO: Example
     }
 }
