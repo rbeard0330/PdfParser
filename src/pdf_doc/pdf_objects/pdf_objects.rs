@@ -5,7 +5,9 @@ use std::rc::{Rc, Weak};
 
 use super::*;
 use crate::errors::*;
-use crate::doc_tree::pdf_file::decode::*;
+use ErrorKind::*;
+use crate::pdf_doc::pdf_file::decode::*;
+use crate::pdf_doc::pdf_file::object_cache::ObjectStreamCache;
 
 pub use PdfData::*;
 
@@ -20,50 +22,56 @@ pub trait PdfObjectInterface: Debug {
     fn try_to_get<T: AsRef<str> + ?Sized>(&self, key: &T) -> Result<Option<SharedObject>>;
     fn try_to_index(&self, index: usize)  -> Result<SharedObject>;
     fn try_into_map(&self) -> Result<Rc<PdfMap>> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "map".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_array(&self) -> Result<Rc<PdfArray>> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "array".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_binary(&self) -> Result<Rc<Vec<u8>>> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "binary".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_string(&self) -> Result<Rc<String>> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "string".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_int(&self) -> Result<i32> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "int".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_float(&self) -> Result<f32> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "float".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_bool(&self) -> Result<bool> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "bool".to_string(),
             format!("{:?}", &self),
         ))?
     }
     fn try_into_content_stream(&self) -> Result<Rc<PdfContentStream>> {
-        Err(ErrorKind::UnavailableType(
+        Err(UnavailableType(
             "content stream".to_string(),
+            format!("{:?}", &self),
+        ))?
+    }
+    fn try_into_object_stream(&self) -> Result<Rc<ObjectStreamCache>> {
+        Err(UnavailableType(
+            "object stream".to_string(),
             format!("{:?}", &self),
         ))?
     }
@@ -111,6 +119,7 @@ pub enum PdfData {
     Dictionary(Rc<PdfMap>),
     ContentStream(Rc<PdfContentStream>),
     BinaryStream(Rc<PdfBinaryStream>),
+    ObjectStream(Rc<ObjectStreamCache>),
     Comment(Rc<String>),
     Null
 }
@@ -154,8 +163,10 @@ impl PdfObject {
         PdfObject::Actual(Dictionary(data))
     }
 
-    pub fn new_content_stream(data: PdfContentStream) -> PdfObject {
-        PdfObject::Actual(ContentStream(Rc::new(data)))
+    pub fn new_content_stream(data: Vec<u8>, attributes: PdfMap) -> PdfObject {
+        PdfObject::Actual(ContentStream(Rc::new(
+            PdfContentStream::new(data, attributes)
+        )))
     }
 
     pub fn new_binary_stream(data: PdfBinaryStream) -> PdfObject {
@@ -170,7 +181,46 @@ impl PdfObject {
         T: Into<u32>,
         S: Into<u32>,
     {
-        PdfObject::Reference(PdfObjectReference { id:id.into(), gen:gen.into(), data })
+        PdfObject::Reference(PdfObjectReference { id: ObjectId(id.into(), gen.into()), data })
+    }
+    pub fn new_object_stream(attributes: PdfMap, data: Vec<u8>, weak_ref: Weak<ObjectCache>) -> Result<PdfObject> {
+        debug_assert_eq!(
+            *attributes.get("Type").expect("No type in object stream dict!").try_into_string().unwrap(),
+            "ObjStm");
+        let object_count = attributes.get("N")
+            .ok_or(ParsingError(format!("No /N key in object stream dict")))?
+            .try_into_int()
+            .chain_err(|| ParsingError(format!("/N key in object stream dict not an integer")))? as usize;
+        let first_object_start = attributes.get("First")
+            .ok_or(ParsingError(format!("No /First key in object stream dict")))?
+            .try_into_int()
+            .chain_err(|| ParsingError(format!("/First key in object stream dict not an integer")))? as usize;
+        // TODO: Implement "Extends"
+        assert!(first_object_start > 0);
+        let index_slice = &data[..(first_object_start as usize)];
+        let index_string = String::from_utf8(Vec::from(index_slice))
+            .chain_err(|| ParsingError(format!("Invalid character in object stream index: {:?}", index_slice)))?;
+        let mut word_iter = index_string.split_whitespace().into_iter();
+        let mut object_index = HashMap::new();
+        loop {
+            let first_word = word_iter.next();
+            let second_word = word_iter.next();
+            if first_word.is_none() { break };
+            if second_word.is_none() {
+                Err(ParsingError(format!("No position for object #{}", first_word.unwrap())))?
+            };
+            let first_word_as_int: u32 = first_word.unwrap().parse()
+                .chain_err(|| ParsingError(format!("Not an integer: {}", first_word.unwrap())))?;
+            let second_word_as_int: usize = second_word.unwrap().parse()
+                .chain_err(|| ParsingError(format!("Not an integer: {}", second_word.unwrap())))?;
+            object_index.insert(ObjectId(first_word_as_int, 0), second_word_as_int + first_object_start);
+        };
+        debug_assert_eq!(object_index.len(), object_count);
+        Ok(PdfObject::Actual(
+            ObjectStream(Rc::new(ObjectStreamCache::new(
+                object_index, data, weak_ref
+            )))
+        ))
     }
 }
 
@@ -190,6 +240,7 @@ impl PdfObjectInterface for PdfObject {
                 ContentStream(_) => Ok(DataType::String),
                 BinaryStream(_) => Ok(DataType::VecU8),
                 Comment(_) => Ok(DataType::String),
+                ObjectStream(_) => Ok(DataType::VecObjects),
                 Null => Ok(DataType::Null)
             }
         }
@@ -209,6 +260,7 @@ impl PdfObjectInterface for PdfObject {
                 ContentStream(_) => Ok(PdfDataType::Stream),
                 BinaryStream(_) => Ok(PdfDataType::Stream),
                 Comment(_) => Ok(PdfDataType::Comment),
+                ObjectStream(_) => Ok(PdfDataType::Stream),
                 Null => Ok(PdfDataType::Null)
             }
         }
@@ -218,7 +270,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_to_get(key),
             PdfObject::Actual(ref obj) => match obj {
                 Dictionary(map) => Ok(map.get(key.as_ref()).map(|result| Rc::clone(result))),
-                _ => Err(ErrorKind::UnavailableType("map".to_string(), "try_to_get".to_string()))?
+                _ => Err(UnavailableType("map".to_string(), "try_to_get".to_string()))?
 
             }
         }
@@ -228,7 +280,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_to_index(index),
             PdfObject::Actual(ref obj) => match obj {
                 Array(vec) => Ok(Rc::clone(&vec[index])),
-                _ => Err(ErrorKind::UnavailableType("vector".to_string(), "try_to_index".to_string()))?
+                _ => Err(UnavailableType("vector".to_string(), "try_to_index".to_string()))?
 
             }
         }
@@ -238,7 +290,11 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_map(),
             PdfObject::Actual(ref obj) => match obj {
                 Dictionary(map) => Ok(Rc::clone(map)),
-                _ => Err(ErrorKind::UnavailableType("map".to_string(), "try_into_map".to_string()))?
+                BinaryStream(stream) => Ok(Rc::new(stream.attributes.clone())),
+                _ => {
+                    error!("Data type: {:?}", self.get_data_type()?);
+                    Err(UnavailableType("map".to_string(), "try_into_map".to_string()))?
+                }
             }
         }
     }
@@ -247,7 +303,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_array(),
             PdfObject::Actual(ref obj) => match obj {
                 Array(arr) => Ok(Rc::clone(arr)),
-                _ => Err(ErrorKind::UnavailableType("array".to_string(), "try_into_array".to_string()))?
+                _ => Err(UnavailableType("array".to_string(), "try_into_array".to_string()))?
             }
         }
     }
@@ -256,8 +312,8 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_binary(),
             PdfObject::Actual(ref obj) =>  match obj {
                 HexString(vec) => Ok(Rc::clone(vec)),
-                //TODO: Add binary streams
-                _ => Err(ErrorKind::UnavailableType("binary".to_string(), "try_into_binary".to_string()))?
+                BinaryStream(stream) => Ok(Rc::clone(&stream.data)),
+                _ => Err(UnavailableType("binary".to_string(), "try_into_binary".to_string()))?
             },
         }
     }
@@ -266,7 +322,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_string(),
             PdfObject::Actual(obj) => match obj {
                 CharString(s) | Name(s) | Comment(s) => Ok(Rc::clone(s)),
-                _ => Err(ErrorKind::UnavailableType(
+                _ => Err(UnavailableType(
                     "string".to_string(),
                     format!("{:?}", &self)))?
             }
@@ -277,7 +333,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_int(),
             PdfObject::Actual(ref obj) =>  match obj {
                 NumberInt(int) => Ok(*int),
-                _ => Err(ErrorKind::UnavailableType("integer".to_string(), "try_into_int".to_string()))?
+                _ => Err(UnavailableType("integer".to_string(), "try_into_int".to_string()))?
             },
         }
     }
@@ -286,7 +342,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_float(),
             PdfObject::Actual(ref obj) =>  match obj {
                 NumberFloat(float) => Ok(*float),
-                _ => Err(ErrorKind::UnavailableType("float".to_string(), "try_into_float".to_string()))?
+                _ => Err(UnavailableType("float".to_string(), "try_into_float".to_string()))?
             }
         }
     }
@@ -295,8 +351,17 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Reference(ref link) => link.get()?.try_into_bool(),
             PdfObject::Actual(ref obj) =>  match obj {
                 Boolean(b) => Ok(*b),
-                _ => Err(ErrorKind::UnavailableType("boolean".to_string(), "try_into_bool".to_string()))?
+                _ => Err(UnavailableType("boolean".to_string(), "try_into_bool".to_string()))?
             },
+        }
+    }
+    fn try_into_object_stream(&self) -> Result<Rc<ObjectStreamCache>> {
+        match self {
+            PdfObject::Reference(ref link) => link.get()?.try_into_object_stream(),
+            PdfObject::Actual(ref obj) =>  match obj {
+                ObjectStream(cache) => Ok(Rc::clone(cache)),
+                _ => Err(UnavailableType("object_stream".to_string(), "try_into_object_stream".to_string()))?
+            }
         }
     }
     fn is_map(&self) -> bool {
@@ -426,7 +491,7 @@ impl Clone for PdfObject {
         match &self {
             &PdfObject::Actual(obj) => PdfObject::Actual(obj.clone()),
             &PdfObject::Reference(obj_ref) => PdfObject::Reference(PdfObjectReference{
-                id: obj_ref.id, gen: obj_ref.gen, data: Weak::clone(&obj_ref.data)
+                id: obj_ref.id, data: Weak::clone(&obj_ref.data)
             })
         }
     }
@@ -447,7 +512,8 @@ impl fmt::Display for PdfObject {
                 Array(v) => write!(f, "Array: {:#?}", v),
                 Dictionary(h) => write!(f, "Dictionary: {:#?}", h),
                 ContentStream(d) => write!(f, "Content stream object: {}", d),
-                BinaryStream(d) => write!(f, "Content stream object: {}", d),
+                BinaryStream(d) => write!(f, "Binary stream object: {}", d),
+                ObjectStream(d) => write!(f, "Object stream object: {}", d),
                 Comment(s) => write!(f, "Comment: {:?}", s),
                 Null => write!(f, "Null")
             //Keyword(kw) => write!(f, "Keyword: {:?}", kw),
@@ -458,16 +524,15 @@ impl fmt::Display for PdfObject {
 }
 
 #[derive(Debug, Clone)]
-struct PdfObjectReference<T: PdfFileInterface<PdfObject>> {
-    id: u32,
-    gen: u32,
+struct PdfObjectReference<T: ParserInterface<PdfObject>> {
+    id: ObjectId,
     data: Weak<T>,
 }
 
-impl<T: PdfFileInterface<PdfObject> + Debug> PdfObjectReference<T> {
+impl<T: ParserInterface<PdfObject> + Debug> PdfObjectReference<T> {
     fn get(&self) -> Result<SharedObject> {
         let usable_ref = self.data.upgrade().expect("Could not access weak ref in File Interface get");
-        usable_ref.retrieve_object_by_ref(self.id, self.gen)
+        usable_ref.retrieve_object_by_ref(self.id)
     }
 }
 
@@ -476,6 +541,7 @@ struct PdfFile {}
 pub struct Image {}
 pub struct ContentStream {}
 
+#[derive(Debug, Clone, Copy)]
 pub enum DataType {
     Boolean,
     VecObjects,
@@ -487,6 +553,7 @@ pub enum DataType {
     Null
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum PdfDataType {
     Boolean,
     Number,
