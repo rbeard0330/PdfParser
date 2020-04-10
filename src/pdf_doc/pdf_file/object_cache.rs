@@ -41,6 +41,9 @@ impl ObjectCache {
     pub fn get_object_list(&self) -> Vec<ObjectId> {
         self.index_map.borrow().iter().map(|(a, _)| *a).collect()
     }
+    pub fn weak_ref(&self) -> Weak<Self> {
+        Weak::clone(&*self.self_ref.borrow())
+    }
 }
 
 impl ParserInterface<PdfObject> for ObjectCache {

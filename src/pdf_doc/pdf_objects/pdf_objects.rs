@@ -6,8 +6,8 @@ use std::rc::{Rc, Weak};
 use super::*;
 use crate::errors::*;
 use ErrorKind::*;
-use crate::doc_tree::pdf_file::decode::*;
-use crate::doc_tree::pdf_file::object_cache::ObjectStreamCache;
+use crate::pdf_doc::pdf_file::decode::*;
+use crate::pdf_doc::pdf_file::object_cache::ObjectStreamCache;
 
 pub use PdfData::*;
 

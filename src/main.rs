@@ -1,6 +1,6 @@
 #![recursion_limit = "1024"]
-#[path = "pdf_doc/doc_tree.rs"]
-mod doc_tree;
+#[path = "pdf_doc/pdf_doc.rs"]
+mod pdf_doc;
 
 #[macro_use]
 extern crate error_chain;
@@ -53,7 +53,7 @@ fn main() {
     pretty_env_logger::init_timed();
     //let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/document.pdf").unwrap();
     //let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/treatise.pdf").unwrap();
-    let pdf_doc = doc_tree::PdfDoc::create_pdf_from_file("data/PDF32000_2008.pdf").unwrap();
+    let pdf_doc = pdf_doc::PdfDoc::create_pdf_from_file("data/PDF32000_2008.pdf").unwrap();
     //println!("{}", pdf_doc);
 }
 

@@ -5,7 +5,7 @@ use flate2;
 
 use super::*;
 use crate::errors::*;
-use crate::doc_tree::pdf_objects::PdfObjectInterface;
+use crate::pdf_doc::pdf_objects::PdfObjectInterface;
 
 #[derive(Debug)]
 pub struct PdfContentStream {

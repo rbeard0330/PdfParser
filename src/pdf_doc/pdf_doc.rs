@@ -360,7 +360,7 @@ mod tests {
             println!("Page count: {:?}", doc.page_count());
             let mut counter = 0;
             for (page_num, page) in doc.pages().enumerate() {
-                println!("Page {}: {}", page_num + 1, page);
+                //println!("Page {}: {}", page_num + 1, page);
                 counter += 1;
             }
             assert_eq!(doc.page_count(), counter);
@@ -372,7 +372,8 @@ mod tests {
         let doc = PdfDoc::create_pdf_from_file("data/PDF32000_2008.pdf").unwrap();
         let page_count = 756;
         for page in 1..page_count {
-            println!("Page {}: {}", page, doc.page_tree.get_page(page).unwrap());
+            doc.page_tree.get_page(page).unwrap();
+            //println!("Page {}: {}", page, doc.page_tree.get_page(page).unwrap());
         }
     }
 }

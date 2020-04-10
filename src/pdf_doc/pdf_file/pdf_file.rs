@@ -63,23 +63,81 @@ impl Parser {
             object_map: cache_ref,
         };
 
-        let (xref_start, xref_type) = Parser::find_xref_start_and_type(pdf.object_map.reader())?;
-        let (index, file_trailer) = match xref_type {
-            XrefType::Standard =>  {
-                let xrefs = Parser::process_standard_xref_table(pdf.object_map.reader(), xref_start)?;
-                let (trailer, _) = Parser::get_standard_trailer(pdf.object_map.reader(), &weak_ref)?;
-                (xrefs, Some(trailer))
-            },
-            XrefType::Stream => {
-                let (xrefs, trailer) = pdf.process_xref_stream(xref_start, &weak_ref)?;
-                (xrefs, Some(trailer))
-            }
-        };
-        //println!("{:#?}", index);
+        pdf.get_trailer_and_object_map()?;
+
+        // let (xref_start, xref_type) = Parser::find_xref_start_and_type(pdf.object_map.reader())?;
+        // let (index, file_trailer) = match xref_type {
+        //     XrefType::Standard =>  {
+        //         let xrefs = Parser::process_standard_xref_table(pdf.object_map.reader(), xref_start)?;
+        //         let (trailer, _) = Parser::get_standard_trailer(pdf.object_map.reader(), &weak_ref)?;
+        //         (xrefs, Some(trailer))
+        //     },
+        //     XrefType::Stream => {
+        //         let (xrefs, trailer) = pdf.process_xref_stream(xref_start, &weak_ref)?;
+        //         (xrefs, Some(trailer))
+        //     }
+        // };
+        // //println!("{:#?}", index);
         
-        pdf.trailer = file_trailer;
-        pdf.object_map.update_index(index);
+        
         Ok(pdf)
+    }
+
+    fn get_trailer_and_object_map(&mut self) -> Result<()> {
+        //Step back from EOF to find xrefstart keyword. Then, get integer value
+        let mut reader = self.reader();
+        reader.seek(SeekFrom::End(-1))?;
+        assert_eq!(str::from_utf8(reader.peek_current_line()).expect("Internal error: line not ascii"), "%%EOF");
+        let steps = reader.step_to_end_of_prior_line();
+        debug_assert!(steps != 0);
+        let xref_start: usize = str::from_utf8(reader.peek_current_line())
+                                .chain_err(|| ErrorKind::ParsingError(format!("Xref start contains non-ASCII")))?
+                                .parse()
+                                .chain_err(|| ErrorKind::ParsingError(format!("Xref start not an integer")))?;
+        let steps = reader.step_to_end_of_prior_line();
+        debug_assert!(steps != 0);
+        assert_eq!(str::from_utf8(reader.peek_current_line()).expect("Internal error: line not ascii"), "startxref");
+
+        let (trailer, index) = self.parse_trailer_and_object_map_at_location(xref_start)?;
+        self.object_map.update_index(index);
+        self.trailer = Some(trailer);
+        Ok(())
+    }
+
+    fn parse_trailer_and_object_map_at_location(&mut self, xref_start: usize) -> Result<(PdfObject, XrefMap)> {
+        //Go to index and see what's there
+        let mut next_xref_start = xref_start;
+        let mut current_map = HashMap::new();
+        let mut final_trailer = None;
+        loop {
+            let mut reader = self.reader();
+            reader.seek(SeekFrom::Start(next_xref_start as u64))?;
+
+            let (this_map, this_trailer) = match reader.peek_current_line() {
+                // If traditional xref table, collect locations, then step BACK to get trailer dict
+                b"xref" => {
+                    // Advances reader to trailer
+                    let map = Parser::process_standard_xref_table(&mut reader, current_map)?;
+                    let (trailer, _) = Parser::get_standard_trailer(reader, &self.object_map.weak_ref())?;
+                    (map, trailer)
+                },
+                // If xref stream, read dict and stream
+                _ => Parser::process_xref_stream(reader, next_xref_start, self.object_map.weak_ref(), current_map)?
+            };
+            // Keep first trailer we see
+            let prev_entry = this_trailer
+                .try_into_map()?
+                .get("Prev")
+                .map(|obj| obj.try_into_int());
+            if let None = final_trailer { final_trailer = Some(this_trailer); };
+            // Then, check for Prev value and repeat 
+            next_xref_start = match prev_entry {
+                None => return Ok((final_trailer.unwrap(), this_map)),
+                Some(obj) => obj? as usize
+            };
+            current_map = this_map;
+
+        }
     }
 
     fn find_xref_start_and_type(mut reader: PdfFileReader) -> Result<(usize, XrefType)> {
@@ -128,10 +186,10 @@ impl Parser {
         }
     }
 
-    fn process_standard_xref_table(mut reader: PdfFileReader, start_index: usize) -> Result<XrefMap> {
-        reader.seek(SeekFrom::Start(start_index as u64))?;
+    fn process_standard_xref_table(reader: &mut PdfFileReader, mut map: XrefMap)
+            -> Result<XrefMap> {
+        
         debug_assert_eq!(reader.read_current_line(), &[b'x', b'r', b'e', b'f']);
-        let mut index_map = HashMap::new();
         let mut free_objects = Vec::new();
         let mut obj_number = 0;
         let mut objects_to_go = 0;
@@ -140,7 +198,7 @@ impl Parser {
             //println!("Reading line {}", line);
             
             if !(line.chars().last().unwrap() == 'n' || line.chars().last().unwrap() == 'f') {
-                if line == "trailer" {break};
+                if line == "trailer" { break };
                 let line_components: Result<Vec<u32>> =
                     line.split_whitespace()
                         .map(|s| s.parse().chain_err(||ParsingError(format!("Could not parse {:?}", s))))
@@ -174,8 +232,12 @@ impl Parser {
                                     ||ParsingError(format!("Non-integer as object identifier: {}", line_components[1]))
                                 )?;
             match line_components[2] {
-                "n" => { index_map.insert(ObjectId(obj_number, second_number),
-                         ObjectLocation::Uncompressed(first_number)); },
+                "n" => { 
+                    if !map.contains_key(&ObjectId(obj_number, second_number)) {
+                        map.insert(ObjectId(obj_number, second_number),
+                                   ObjectLocation::Uncompressed(first_number));
+                    }
+                },
                 "f" => free_objects.push(first_number),
                 _ => Err(ParsingError(format!("Could not resolve line-end: {}", line_components[2])))?
             };
@@ -183,14 +245,15 @@ impl Parser {
             objects_to_go -= 1;
         }
         let _sink = free_objects;
-        Ok(index_map)
+        Ok(map)
     }
 
-    fn process_xref_stream(&mut self, start_index: usize, weak_ref: &Weak<ObjectCache>)
+    fn process_xref_stream(
+        reader: PdfFileReader, start_index: usize, weak_ref: Weak<ObjectCache>, mut object_map: XrefMap)
             -> Result<(XrefMap, PdfObject)> {
-        let (stream, _) = parse_uncompressed_object_at(self.object_map.reader(), start_index, weak_ref)?;
-        let map = stream.try_into_map().unwrap();
-        let v: Vec<_> = map.get("W")
+        let (stream, _) = parse_uncompressed_object_at(reader, start_index, &weak_ref)?;
+        let stream_map = stream.try_into_map().unwrap();
+        let v: Vec<_> = stream_map.get("W")
                              .ok_or(ParsingError(format!("Missing W entry in crossref stream")))?
                              .try_into_array()?
                              .iter()
@@ -198,12 +261,45 @@ impl Parser {
                              .collect::<Vec<_>>();
         let data = stream.try_into_binary()?;
         //println!("data: {:?}", data);
+
+        let object_count = stream_map.get("Size")
+            .ok_or(ParsingError(format!("No /Size entry in xref stream: {:#?}", data)))?
+            .try_into_int()?;
+        let mut index_array = match stream_map.get("Index") {
+            None => vec!((0, object_count)),
+            Some(array) => {
+                let index = array.try_into_array()?;
+                assert_eq!(index.len() % 2, 0);
+                let mut output = Vec::new();
+                let mut index_iter = index.iter();
+                loop {
+                    let start = index_iter.next();
+                    let number = index_iter.next();
+                    if let None = start { break };
+                    output.push(
+                        (start.unwrap().try_into_int()?,
+                         number.unwrap().try_into_int()?));
+
+                }
+                output.into_iter().rev().collect()
+            }
+        };
+
         let line_length = v[0] + v[1] + v[2];
         assert_eq!(data.len() % line_length, 0);
         let line_count = data.len() / line_length;
+        let mut objects_left_in_tranche = 0;
         let mut object_number = 0;
-        let mut index = HashMap::new();
         for line_ix in 0..line_count {
+            if objects_left_in_tranche == 0 {
+                if index_array.len() == 0 { panic!("Index array exhausted with lines left! process_xref_stream") };
+                let (n1, n2) = index_array.pop().unwrap();
+                object_number = n1 as u32;
+                objects_left_in_tranche = n2 as u32;
+            } else {
+                object_number += 1;
+                objects_left_in_tranche -= 1;
+            }
             let line_start = line_ix * line_length as usize;
             let field2_start = line_start + v[0];
             let field3_start = field2_start + v[1];
@@ -213,22 +309,19 @@ impl Parser {
             let field3 = u8_slice_as_int(&data[field3_start..(line_start +line_length)]);
             //println!("{} {:>7} {}", field1, field2, field3);
             match field1 {
-                0 => {object_number += 1; continue}
-                1 => index.insert(ObjectId(object_number, field3), ObjectLocation::Uncompressed(field2 as usize)),
-                2 => index.insert(ObjectId(object_number, 0), ObjectLocation::Compressed(ObjectId(field2, 0), field3)),
+                0 => { continue },
+                1 => object_map.entry(ObjectId(object_number, field3))
+                        .or_insert(ObjectLocation::Uncompressed(field2 as usize)),
+                2 => object_map.entry(ObjectId(object_number, 0))
+                        .or_insert(ObjectLocation::Compressed(ObjectId(field2, 0), field3)),
                 _ => Err(ParsingError(format!("Unsupported type field: {}", field1)))?
             };
-            object_number += 1;
         }
         //println!("index: {:?}", index);
-        Ok((index, stream))
+        Ok((object_map, stream))
     }
-
-    fn merge_previous(reader: PdfFileReader, index: usize, xrefs: XrefMap) -> Result<XrefMap> {
-        
-        
-        Err(ParsingError(format!("Unsupported type fiel")))?
-
+    fn reader(&self) -> PdfFileReader {
+        self.object_map.reader()
     }
 }
 
@@ -834,7 +927,7 @@ mod tests {
         for path in &TEST_PDFS {
             println!("{}", path);
             let mut pdf = Parser::create_pdf_from_file(path).unwrap();
-            results.push(add_all_objects(&mut pdf));
+            results.push(add_all_objects(&mut pdf, path));
         }
         let results: Vec<_> = results
             .into_iter()
@@ -854,22 +947,22 @@ mod tests {
         for path in &TEST_PDFS {
             println!("{}", path);
             let mut pdf = Parser::create_pdf_from_file(path).unwrap();
-            match add_all_objects(&mut pdf) {
+            match add_all_objects(&mut pdf, path) {
                 Ok(_) => println!("Ok!"),
                 Err(_) => println!("Err!")
             };
         }
     }
 
-    fn add_all_objects(pdf: &mut Parser) -> Result<()> {
+    fn add_all_objects(pdf: &mut Parser, file_name: &str) -> Result<()> {
         let objects_to_add: Vec<ObjectId> = pdf.object_map.get_object_list();
         for object_number in objects_to_add {
-            println!("Retrieving {}", object_number);
+            //println!("Retrieving {}", object_number);
             match pdf.retrieve_object_by_ref(object_number) {
                 Ok(_obj) => {},// println!("Obj #{} successfully retrieved: {}", object_number, obj); },
                 Err(e) => {
                     //println!("**Obj #{} ERROR**: {}", object_number, e);
-                    Err(e.chain_err(|| ErrorKind::TestingError(format!("**Obj #{} ERROR**", object_number))))?;
+                    Err(e.chain_err(|| ErrorKind::TestingError(format!("**Obj #{} in {} ERROR**", object_number, file_name))))?;
                 }
             };
         }
