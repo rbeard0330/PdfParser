@@ -67,6 +67,10 @@ pub fn is_valid_ascii_85_byte(c: u8) -> bool {
     }
 }
 
+pub fn to_ascii(data: Vec<u8>) -> String {
+    data.iter().map(|i| *i as char).collect()
+}
+
 pub fn u8_slice_as_int(slice: &[u8]) -> u32 {
     let mut acc = 0;
     for d in slice {

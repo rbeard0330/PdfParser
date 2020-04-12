@@ -2,6 +2,7 @@
 mod pdf_file;
 #[path = "pdf_objects/pdf_objects.rs"]
 mod pdf_objects;
+mod page;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,9 +10,10 @@ use std::rc::Rc;
 
 use crate::errors::*;
 use ErrorKind::*;
-use vec_tree::VecTree;
+use vec_tree;
 
 pub use pdf_file::*;
+use page::Page;
 
 type TreeIndex = vec_tree::Index;
 struct DocTree {}
@@ -98,6 +100,9 @@ impl Node {
             _ => false
         }
     }
+    pub fn has_contents(&self) -> bool {
+        self.contents.is_some()
+    }
 }
 
 
@@ -124,13 +129,13 @@ impl fmt::Display for Node {
 }
 
 #[derive(Debug)]
-struct PageTree {
-    tree: VecTree<Node>,
+pub struct PageTree {
+    tree: vec_tree::VecTree<Node>,
 }
 
 impl PageTree {
     fn new(root: &PdfObject) -> Result<Self> {
-        let mut new_tree = PageTree{ tree: VecTree::new() };
+        let mut new_tree = PageTree{ tree: vec_tree::VecTree::new() };
         new_tree.add_node(root, None)?;
         Ok(new_tree)
     }
@@ -212,7 +217,7 @@ impl PageTree {
         }
     }
     
-    pub fn get_page(&self, page_number: usize) -> Option<&Node> {
+    pub fn get_page(&self, page_number: usize) -> Option<page::Page> {
         if page_number > self.page_count().ok()? { return None };
         let mut current_node = self.tree.get_root_index()?;
         let mut pages_passed = 0;
@@ -223,7 +228,7 @@ impl PageTree {
                 //println!("Current node: {}", this_child);
                 if this_child.is_page() {
                     if pages_passed == page_number - 1 {
-                        return Some(this_child)
+                        return Some(page::Page::new_from_index(child, &self))
                     };
                     pages_passed += 1;
                     continue
@@ -273,7 +278,7 @@ struct Pages<'a> {
 }
 
 impl<'a> Iterator for Pages<'a> {
-    type Item = &'a Node;
+    type Item = Page<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         self.current_page += 1;
         self.tree.get_page(self.current_page)

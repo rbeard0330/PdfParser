@@ -1,5 +1,5 @@
 pub mod decode;
-mod util;
+use crate::util;
 mod file_reader;
 pub mod object_cache;
 

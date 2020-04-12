@@ -10,12 +10,12 @@ use crate::pdf_doc::pdf_objects::PdfObjectInterface;
 #[derive(Debug)]
 pub struct PdfContentStream {
     attributes: PdfMap,
-    data: String
+    data: Rc<Vec<u8>>
 }
 
 impl Display for PdfContentStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Attributes: {:#?}, Content: {}", self.attributes, self.data)?;
+        write!(f, "Attributes: {:#?}, Content: {}", self.attributes, util::to_ascii((*self.data).clone()))?;
         Ok(())
     }
 }
@@ -36,8 +36,12 @@ impl Display for PdfBinaryStream {
 impl PdfContentStream {
     pub fn new(data: Vec<u8>, attributes: PdfMap) -> Self {
         PdfContentStream{
-            data: to_ascii(data), attributes
+            data: Rc::new(data), attributes
         }
+    }
+
+    pub fn get_binary_ref(&self) -> Rc<Vec<u8>> {
+        Rc::clone(&self.data)
     }
 }
 
@@ -75,10 +79,7 @@ impl std::fmt::Display for Filter {
     }
 }
 
-fn to_ascii(data: Vec<u8>) -> String {
-    data.iter().map(|i| *i as char).collect()
 
-}
 
 impl Filter {
     pub fn apply(self, data: Result<Vec<u8>>) -> Result<Vec<u8>> {

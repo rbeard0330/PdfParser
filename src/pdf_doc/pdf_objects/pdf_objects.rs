@@ -63,12 +63,6 @@ pub trait PdfObjectInterface: Debug {
             format!("{:?}", &self),
         ))?
     }
-    fn try_into_content_stream(&self) -> Result<Rc<PdfContentStream>> {
-        Err(UnavailableType(
-            "content stream".to_string(),
-            format!("{:?}", &self),
-        ))?
-    }
     fn try_into_object_stream(&self) -> Result<Rc<ObjectStreamCache>> {
         Err(UnavailableType(
             "object stream".to_string(),
@@ -237,7 +231,7 @@ impl PdfObjectInterface for PdfObject {
                 HexString(_) => Ok(DataType::VecU8),
                 Array(_) => Ok(DataType::VecObjects),
                 Dictionary(_) => Ok(DataType::HashMap),
-                ContentStream(_) => Ok(DataType::String),
+                ContentStream(_) => Ok(DataType::VecU8),
                 BinaryStream(_) => Ok(DataType::VecU8),
                 Comment(_) => Ok(DataType::String),
                 ObjectStream(_) => Ok(DataType::VecObjects),
@@ -313,6 +307,7 @@ impl PdfObjectInterface for PdfObject {
             PdfObject::Actual(ref obj) =>  match obj {
                 HexString(vec) => Ok(Rc::clone(vec)),
                 BinaryStream(stream) => Ok(Rc::clone(&stream.data)),
+                ContentStream(data) => Ok(data.get_binary_ref()),
                 _ => Err(UnavailableType("binary".to_string(), "try_into_binary".to_string()))?
             },
         }
