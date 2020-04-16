@@ -17,7 +17,7 @@ pub fn is_delimiter(c: u8) -> bool {
 }
 
 pub fn is_hex(c: u8) -> bool {
-    (b'0' <= c && c <= b'9') || (b'A' <= c && c <= b'F')
+    (b'0' <= c && c <= b'9') || (b'A' <= c && c <= b'F') || (b'a' <= c && c <= b'f')
 }
 
 pub fn is_eol(c: u8) -> bool {

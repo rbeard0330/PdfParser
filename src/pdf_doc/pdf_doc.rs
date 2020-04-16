@@ -381,4 +381,11 @@ mod tests {
             //println!("Page {}: {}", page, doc.page_tree.get_page(page).unwrap());
         }
     }
+
+    fn get_specific_page() {
+        let source = "data/PDF32000_2008.pdf";
+        let doc = PdfDoc::create_pdf_from_file(source).unwrap();
+        doc.page_tree.get_page(1).unwrap();
+        //println!("Page {}: {}", page, doc.page_tree.get_page(page).unwrap());
+    }
 }

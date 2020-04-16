@@ -1,3 +1,5 @@
+//#![allow(warnings, unused)]
+
 #![recursion_limit = "1024"]
 #[path = "pdf_doc/pdf_doc.rs"]
 mod pdf_doc;
@@ -9,6 +11,10 @@ extern crate error_chain;
 extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
+
+extern crate pest;
+#[macro_use]
+extern crate pest_derive;
 
 mod errors {
     error_chain! {

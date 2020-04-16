@@ -1,0 +1,167 @@
+//Applicable to all PDF
+WHITESPACE = _{" " | "\t" | "\r" | "\n" | "\x00" } // Add form feed
+eol_char = _{"\n" | "\r" | "\r\n"}
+delimiter = _{"\\" | "/" | "{" | "}" | "(" | ")" | "<" | ">" | "[" | "]" | "%"}
+regular_character = _{!(delimiter | WHITESPACE) ~ '$' .. '~'}
+
+COMMENT = @{"%" ~ (!eol_char ~ ANY)*}
+boolean = {"true" | "false"}
+
+// Numbers
+number = _{ float | integer }
+integer = @{("+" | "-")? ~ ASCII_DIGIT+}
+float = @{
+    ("+" | "-")? ~ ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+
+    | ("+" | "-")? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT*
+} // Need at least one digit before or after .
+
+// Literal Strings
+string = { literal_string | hex_string }
+recognized_escape_char = {
+    "n" | "r" | "t" | "b" | "f" | "(" | ")" | "\\" | ASCII_OCT_DIGIT{1,3}
+}
+escaped_string_char = @{ "\\" ~ recognized_escape_char }
+ignored_rev_solidus = { "\\" ~ !recognized_escape_char }
+
+regular_string_chars = { !("(" | ")" | "\\") ~ ANY }
+inner_string = {
+    "(" ~ ( escaped_string_char | regular_string_chars)* ~ ")"
+}
+literal_string = @{
+    "(" ~ ( inner_string | escaped_string_char | regular_string_chars | ignored_rev_solidus )* ~ ")"
+}
+
+// Hex Strings
+hex_string = {"<" ~ ASCII_HEX_DIGIT* ~ ">"}
+
+// Names
+escaped_name_char = _{"#" ~ ASCII_HEX_DIGIT{2}}
+regular_name_char = _{!"#" ~ regular_character}
+name = @{"/" ~ (escaped_name_char | regular_name_char)+}
+
+// Complex objects
+array = { "[" ~ pdf_object* ~ "]" }
+dictionary = { "<<" ~ (name ~ pdf_object)* ~ ">>" }
+
+pdf_object = {
+    boolean | number | string | name | array | dictionary
+}
+
+// Operators
+
+// Special graphics state
+q = { "q" }
+Q = { "Q" }
+cm = { number{6} ~ "cm" }
+special_graphics_state = _{ q | Q | cm }
+
+// General graphics state
+w = { number ~ "w" }
+J = { number ~ "J" }
+j = { number ~ "j" }
+M = { number ~ "M" }
+d = { array ~ number ~ "d" }
+ri = { name ~ "ri" }
+i = { number ~ "i" }
+gs = { name ~ "gs" }
+general_graphics_state = _{ w | J | j | M | d | ri | i | gs }
+
+// Path construction
+m = { number{2} ~ "m" }
+l = { number{2} ~ "l" }
+c = { number{6} ~ "c" }
+v = { number{4} ~ "v" }
+y = { number{4} ~ "y" }
+h = { "h" }
+re = { number{4} ~ "re" }
+path_construction = _{ m | l | c | v | y | h | re }
+
+// Path painting
+S = { "S" }
+s = { "s" }
+f = { "f" | "F" }
+f_star = { "f*" }
+B = { "B" }
+B_star = { "B*" }
+b = { "b" }
+b_star = { "b*" }
+n = { "n" }
+path_painting = _{ S | s | f_star | f | B_star | B | b_star | b | n }
+
+// Clipping paths
+W = { "W" }
+W_star = { "W*" }
+clipping = _{ W | W_star }
+
+
+// Text state
+Tc = { number ~ "Tc" }
+Tw = { number ~ "Tw" }
+Tz = { number ~ "Tz" }
+TL = { number ~ "TL" }
+Tf = { name ~ number ~ "Tf" }
+Tr = { integer ~ "Tr" }
+Ts = { number ~ "Ts" }
+text_state = _{ Tc | Tw | Tz | TL | Tf | Tr | Ts }
+// Text positioning
+Td = { number{2} ~ "Td" }
+TD = { number{2} ~ "TD" }
+Tm = { number{6} ~ "Tm" }
+Tstar = { "T*" }
+// Text showing
+Tj = { string ~ "Tj"}
+Tj_newline = { string ~ "'"}
+Tj_scaled = { number{2} ~ string ~ "\"" }
+TJ = { "[" ~ (number | string)+ ~ "]" ~ "TJ"}
+text_operators = _{ Tstar | Tc | Tw | Tz | TL | Tf | Tr | Ts | Td | TD | Tm | Tj | Tj_newline | Tj_scaled | TJ }
+
+
+// Type 3 fonts
+d0 = { number{2} ~ "d0" }
+d1 = { number{6} ~ "d1" }
+
+// Color
+CS = { name ~ "CS" }
+cs = { name ~ "cs" }
+SCN = { number* ~ name? ~ "SCN" }
+scn = { number* ~ name? ~ "scn" }
+SC = { number{1, 4} ~ "SC" }
+sc = { number{1, 4} ~ "sc" }
+G = { number ~ "G" }
+g = { number ~ "g" }
+RG = { number{3} ~ "RG" }
+rg = { number{3} ~ "rg" }
+K = { number{4} ~ "K" }
+k = { number{4} ~ "k" }
+color_operator = _{ CS | cs | SCN | scn | SC | sc | G | g | RG | rg | K | k }
+
+// Inline images
+inline_image = _{ "BI" ~ (!"ID" ~ ANY)* ~ "ID" ~ (!"EI" ~ ANY) * ~ "EI" }
+
+// Marked content
+point_tag = { name ~ "MP" }
+point_tag_properties = { name ~ (name | dictionary) ~ "DP" }
+sequence_tag_properties = { name ~ (name | dictionary) ~ "BDC" }
+marked_block = {
+    (sequence_tag_properties | "BMC")
+    ~ (top_level_ops | text_operators | text_block | path_block) *
+    ~ "EMC"}
+content_marker = { point_tag | point_tag_properties | marked_block }
+
+
+// Misc
+shade = { name ~ "sh" }
+paint_x_obj = { name ~ "Do" }
+
+// Blocks
+compatibility_block = _{ "BX" ~ (!"EX" ~ ANY) * ~ "EX" }
+path_block = { ( m | re) ~ ( path_construction | clipping)* ~ path_painting }
+text_block = { "BT" ~ (
+        text_operators | color_operator | marked_block | general_graphics_state
+    )* ~ "ET" 
+}
+top_level_ops = { special_graphics_state | general_graphics_state | color_operator | text_state | content_marker | shade | paint_x_obj }
+
+block = _{ SOI 
+    ~ ( content_marker | top_level_ops | text_block | compatibility_block | path_block | inline_image  )*
+     ~ EOI}

@@ -12,3 +12,6 @@ error-chain = "*"
 vec-tree = "*"
 log = "*"
 pretty_env_logger = "*"
+data_string = { git = "https://github.com/rbeard0330/data_string.git", branch = "master"}
+pest = "*"
+pest_derive = "*"

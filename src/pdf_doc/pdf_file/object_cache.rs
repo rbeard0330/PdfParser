@@ -49,7 +49,7 @@ impl ObjectCache {
 impl ParserInterface<PdfObject> for ObjectCache {
     fn retrieve_object_by_ref(&self, id: ObjectId) -> Result<SharedObject> {
         
-        trace!("retrieving object# {}", id);
+        //println!("retrieving object# {}", id);
         let cache_results;
         {
             let map = self.cache.borrow_mut();
@@ -59,7 +59,10 @@ impl ParserInterface<PdfObject> for ObjectCache {
         use ObjectLocation::*;
         if let None = cache_results {
             let new_obj = match self.index_map.borrow().get(&id) {
-                None => Err(ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?,
+                None => {
+                    //println!("{:?}", self.index_map);
+                    Err(ErrorKind::ReferenceError(format!("Object #{} does not exist", id)))?
+                },
                 Some(Uncompressed(ix)) => Rc::new(parse_uncompressed_object_at(
                     self.reader.spawn_clone(), *ix, &Weak::clone(&self.self_ref.borrow()))?.0),
                 Some(Compressed(parent_id, _index)) => {

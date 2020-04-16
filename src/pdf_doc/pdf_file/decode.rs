@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::fmt::Display;
+use std::fs;
 
 use flate2;
 
@@ -194,7 +195,7 @@ impl Filter {
         let mut output = Vec::new();
         let mut flate_result = zlib_decoder.read_to_end(&mut output);
         if flate_result.is_err() {
-            println!("retrying");
+            println!("retrying: {:#?}", params);
             let mut flate_decoder = flate2::read::DeflateDecoder::new(&*data);
             output.clear();
             flate_result = flate_decoder.read_to_end(&mut output);
@@ -207,6 +208,7 @@ impl Filter {
         }
         if flate_result.is_err() {
             println!("retrying again");
+            fs::write("bad_stream.dat", &data[..]).unwrap();
             data.insert(0, 218);
             data.insert(0, 120);
             let mut zlib_decoder = flate2::read::ZlibDecoder::new(&*data);
@@ -261,25 +263,25 @@ pub fn parse_stream(map: PdfMap, bytes: &[u8], weak_ref: Weak<ObjectCache>) -> R
     // Classify stream
     let type_and_subtype = (map.get("Type"), map.get("Subtype"));
     let stream_type = determine_stream_type(type_and_subtype);
+    use StreamType::*;
     match stream_type {
-        StreamType::Image => 
-            Ok(PdfObject::new_binary_stream(PdfBinaryStream{
-                                attributes: map, data: Rc::new(Vec::from(bytes))
-                            })),
-        StreamType::XRef => {
+        XRef => {
             let data = Rc::new(decode_stream(&map, bytes)?);
             Ok(PdfObject::new_binary_stream(PdfBinaryStream{ attributes: map, data }))
         },
-        StreamType::Object => {
+        Object => {
             let data = decode_stream(&map, bytes)?;
             PdfObject::new_object_stream(map, data, weak_ref)
         },
-        StreamType::Content => {
+        Content => {
             let data = decode_stream(&map, bytes)?;
             //println!("{}", to_ascii(data.clone()));
             Ok(PdfObject::new_content_stream(data, map))
-        }
-        _ => Err(TestingError(format!("{:?} not implemented", stream_type)))?
+        },
+        Image | Font | Form | EmbeddedFile | Metadata | XObject => Ok(PdfObject::new_binary_stream(PdfBinaryStream{
+                            attributes: map, data: Rc::new(Vec::from(bytes))
+                        })),
+        Unknown => Err(TestingError(format!("{:?} not implemented", stream_type)))?
     }
 }
 
@@ -350,17 +352,31 @@ fn filter_from_string_and_params<T: AsRef<str> + Display>(name: T, params: Optio
 
 fn determine_stream_type(tup: (Option<&Rc<PdfObject>>, Option<&Rc<PdfObject>>)) -> StreamType {
     use StreamType::*;
+    let font_types = vec!("Type1C".to_string(), "OpenType".to_string(), "CIDFontType0C".to_string());
     if let Some(object) = tup.0 {
         match object.try_into_string() {
             Ok(s) if *s == "ObjStm" => return Object,
             Ok(s) if *s == "XRef" => return XRef,
             Ok(s) if *s == "Metadata" => return Metadata,
+            Ok(s) if *s == "XObject" => {
+                if let Some(object) = tup.1 {
+                    match object.try_into_string() {
+                        Ok(s) if *s == "Image" => return Image,
+                        Ok(s) if *s == "Form" => return Form,
+                        _ => {println!("Unknown type: {:?}", tup);}
+                    }
+                };
+                return Unknown
+            },
+            Ok(s) if *s == "Font" => return Font,
+            Ok(s) if *s == "EmbeddedFile" => return EmbeddedFile,
             _ => {}
         }
     };
     if let Some(object) = tup.1 {
         match object.try_into_string() {
-            Ok(s) if *s == "Image" => return Image,
+            Ok(s) if *s == "Form" => return Form,
+            Ok(s) if font_types.contains(&*s)  => return Font,
             _ => {}
         }
     };
@@ -369,7 +385,7 @@ fn determine_stream_type(tup: (Option<&Rc<PdfObject>>, Option<&Rc<PdfObject>>)) 
             return Content 
         };
     };
-    //println!("{:?}", tup);
+    println!("Unknown type: {:?}", tup);
     return Unknown
 }
 

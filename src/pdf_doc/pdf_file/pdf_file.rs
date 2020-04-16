@@ -122,7 +122,10 @@ impl Parser {
                     (map, trailer)
                 },
                 // If xref stream, read dict and stream
-                _ => Parser::process_xref_stream(reader, next_xref_start, self.object_map.weak_ref(), current_map)?
+                _ => {
+                    //println!("Parsing a stream at {}", next_xref_start);
+                    Parser::process_xref_stream(reader, next_xref_start, self.object_map.weak_ref(), current_map)?
+                }
             };
             // Keep first trailer we see
             let prev_entry = this_trailer
@@ -251,6 +254,7 @@ impl Parser {
     fn process_xref_stream(
         reader: PdfFileReader, start_index: usize, weak_ref: Weak<ObjectCache>, mut object_map: XrefMap)
             -> Result<(XrefMap, PdfObject)> {
+        //println!("Beginning a new stream");
         let (stream, _) = parse_uncompressed_object_at(reader, start_index, &weak_ref)?;
         let stream_map = stream.try_into_map().unwrap();
         let v: Vec<_> = stream_map.get("W")
@@ -281,25 +285,28 @@ impl Parser {
                          number.unwrap().try_into_int()?));
 
                 }
+                
+                //println!("output: {:?}", output);
                 output.into_iter().rev().collect()
             }
         };
-
+        let index_length = index_array.iter().fold(0, |acc, (_, count)| acc + count);
         let line_length = v[0] + v[1] + v[2];
         assert_eq!(data.len() % line_length, 0);
         let line_count = data.len() / line_length;
+        debug_assert_eq!(index_length as usize, line_count, "Expected a different number of objects in xref stream!");
+        //println!("stream has {} (={}) objects", index_length, line_count);
         let mut objects_left_in_tranche = 0;
         let mut object_number = 0;
+        let mut total_added = 0;
         for line_ix in 0..line_count {
             if objects_left_in_tranche == 0 {
                 if index_array.len() == 0 { panic!("Index array exhausted with lines left! process_xref_stream") };
                 let (n1, n2) = index_array.pop().unwrap();
                 object_number = n1 as u32;
                 objects_left_in_tranche = n2 as u32;
-            } else {
-                object_number += 1;
-                objects_left_in_tranche -= 1;
-            }
+                //println!("Exhausted current array tranche after {} objects.  Next: {}, {}", total_added, object_number, objects_left_in_tranche);
+            };
             let line_start = line_ix * line_length as usize;
             let field2_start = line_start + v[0];
             let field3_start = field2_start + v[1];
@@ -307,17 +314,21 @@ impl Parser {
             let field1 = u8_slice_as_int(&data[line_start..field2_start]);
             let field2 = u8_slice_as_int(&data[field2_start..field3_start]);
             let field3 = u8_slice_as_int(&data[field3_start..(line_start +line_length)]);
-            //println!("{} {:>7} {}", field1, field2, field3);
+
             match field1 {
-                0 => { continue },
-                1 => object_map.entry(ObjectId(object_number, field3))
-                        .or_insert(ObjectLocation::Uncompressed(field2 as usize)),
-                2 => object_map.entry(ObjectId(object_number, 0))
-                        .or_insert(ObjectLocation::Compressed(ObjectId(field2, 0), field3)),
+                0 => {  },
+                1 => {object_map.entry(ObjectId(object_number, field3))
+                        .or_insert(ObjectLocation::Uncompressed(field2 as usize));},
+                2 => {object_map.entry(ObjectId(object_number, 0))
+                        .or_insert(ObjectLocation::Compressed(ObjectId(field2, 0), field3));},
                 _ => Err(ParsingError(format!("Unsupported type field: {}", field1)))?
             };
+            object_number += 1;
+            objects_left_in_tranche -= 1;
+            total_added += 1;
         }
         //println!("index: {:?}", index);
+        //println!("added {}", total_added);
         Ok((object_map, stream))
     }
     fn reader(&self) -> PdfFileReader {
@@ -661,12 +672,18 @@ fn parse_segment(input_reader: PdfFileReader, start_index: usize, weak_ref: &Wea
                             reader.seek(SeekFrom::Current(-1)).unwrap();
                             ParserState::Neutral
                         },
+                        PDFKeyword::False => {
+                            object_buffer.push(PdfObject::new_boolean(false));
+                            reader.seek(SeekFrom::Current(-1)).unwrap();
+                            ParserState::Neutral
+                        },
                         PDFKeyword::Null => {
                             object_buffer.push(PdfObject::Actual(Null));
                             reader.seek(SeekFrom::Current(-1)).unwrap();
                             ParserState::Neutral
                         }
                         _ => {
+                            println!("Context for error: {}", util::to_ascii(reader.peek_current_line().to_vec()));
                             Err(ErrorKind::ParsingError(format!(
                                 "Unrecognized keyword at {}: {:?}",
                                 reader.position() - 1, this_keyword
@@ -787,6 +804,10 @@ enum StreamType {
     XRef,
     Image,
     Metadata,
+    XObject,
+    Font,
+    Form,
+    EmbeddedFile,
     Unknown,
 }
 
@@ -916,7 +937,7 @@ mod tests {
     const TEST_PDFS: [&str; 4] = [
         "data/simple_pdf.pdf",
         "data/f1120.pdf",
-        //"data/PDF32000_2008.pdf",
+        // "data/PDF32000_2008.pdf", Encrypted
         "data/who.pdf",
         "data/treatise.pdf",
     ];
@@ -952,6 +973,20 @@ mod tests {
                 Err(_) => println!("Err!")
             };
         }
+    }
+
+    #[test]
+    fn lookup_object() {
+        let path = "data/treatise.pdf";
+        let obj_number = 113;
+        let mut pdf = Parser::create_pdf_from_file(path).unwrap();
+        match pdf.retrieve_object_by_ref(ObjectId(obj_number, 0)) {
+            Ok(obj) => { println!("Obj #{} successfully retrieved: {}", obj_number, obj); },
+            Err(e) => {
+                println!("**Obj #{} ERROR**: {}", obj_number, e);
+            }
+        };
+
     }
 
     fn add_all_objects(pdf: &mut Parser, file_name: &str) -> Result<()> {
