@@ -9,8 +9,8 @@ use data_string::DataString;
 use super::PageTree;
 use crate::pdf_doc::pdf_objects::{SharedObject, PdfObjectInterface, DataType};
 
-#[path = "layout/postscript.rs"]
-mod postscript;
+#[path = "layout/layout.rs"]
+pub mod layout;
 
 pub struct Page<'a> {
     index: vec_tree::Index,

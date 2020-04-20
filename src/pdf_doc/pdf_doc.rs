@@ -2,7 +2,7 @@
 mod pdf_file;
 #[path = "pdf_objects/pdf_objects.rs"]
 mod pdf_objects;
-mod page;
+pub mod page;
 
 use std::collections::HashMap;
 use std::fmt;

@@ -24,6 +24,7 @@ mod errors {
             Io(::std::io::Error);
             ParseFloat(::std::num::ParseFloatError);
             ParseInt(::std::num::ParseIntError);
+            Pest(::pest::error::Error<crate::pdf_doc::page::layout::postscript::Rule>);
         }
         errors {
             UnavailableType(req: String, thrower: String) {
